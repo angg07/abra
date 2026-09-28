@@ -1,4 +1,4 @@
-// The app's own database: users, login sessions, project members and run history. One SQLite file
+// The app's own database: run history. One SQLite file
 // (app/data/app.db, node:sqlite, no extra dependency); back it up by copying the file.
 // Projects themselves stay folders (tests/<project>/project.json) next to their test files.
 import { DatabaseSync } from 'node:sqlite';
@@ -24,6 +24,8 @@ const MIGRATIONS = [
    CREATE TABLE runs (
      id TEXT PRIMARY KEY, project TEXT, started INTEGER NOT NULL, user_id INTEGER, video TEXT, guide TEXT, data TEXT NOT NULL);
    CREATE INDEX runs_project ON runs (project, started DESC);`,
+  // standalone app: one person per install, no accounts (runs.user_id stays, unused)
+  `DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS users;`,
 ];
 for (let v = db.prepare('PRAGMA user_version').get().user_version; v < MIGRATIONS.length; v++) {
   db.exec('BEGIN'); db.exec(MIGRATIONS[v]); db.exec(`PRAGMA user_version = ${v + 1}`); db.exec('COMMIT');

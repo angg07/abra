@@ -2,11 +2,9 @@
 import { spawn } from 'node:child_process';
 import { readFileSync, rmSync } from 'node:fs';
 import { join, relative, basename } from 'node:path';
-import { REPLAY_CDP_PORT } from './stage.mjs';
-import { dataDir } from './history.mjs';
+import { playwrightCli, killTree } from './proc.mjs';
 
 const root = join(import.meta.dirname, '..');
-const bin = join(root, 'node_modules', '.bin', 'playwright');
 
 // Flatten Playwright's nested JSON report into one row per test
 function results(report, dataRows = 0) {
@@ -48,22 +46,23 @@ function runnerEnv(secrets, apiKeyEnvs) {
 }
 
 // onStep gets each action from steps-reporter.cjs; onLine gets the rest of the runner output
-export function runTests(files, { width, height, device, sessionFile, testDir, vars = {}, envName = '', repeatEach = 1, dataRows = 0, updateSnapshots = false, slowMo = 250, testDataDir, dbUrl, secrets = [], apiKeyEnvs = [] }, { onLine, onStep }, signal) {
-  const reportFile = join(dataDir, `replay-${Date.now()}.json`);
+export function runTests(files, { cdpPort, outputDir, width, height, device, sessionFile, testDir, vars = {}, envName = '', repeatEach = 1, dataRows = 0, updateSnapshots = false, slowMo = 250, testDataDir, dbUrl, secrets = [], apiKeyEnvs = [] }, { onLine, onStep }, signal) {
+  const reportFile = `${outputDir}.json`; // next to the output folder: Playwright empties the folder itself when it starts
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, ['test', ...files.map(f => relative(root, f)), '--config', 'app/replay.config.ts', ...(repeatEach > 1 ? ['--repeat-each', String(repeatEach)] : []), ...(updateSnapshots ? ['--update-snapshots'] : [])], {
+    const { command, args: cli } = playwrightCli(root);
+    const child = spawn(command, [...cli, 'test', ...files.map(f => relative(root, f)), '--config', 'app/replay.config.ts', ...(repeatEach > 1 ? ['--repeat-each', String(repeatEach)] : []), ...(updateSnapshots ? ['--update-snapshots'] : [])], {
       cwd: root,
-      detached: true, // own process group, so Stop can kill the runner and its browser together
+      detached: process.platform !== 'win32', // own process group on macOS/Linux, so Stop can kill the runner and its browser together
       env: {
         ...runnerEnv(secrets, apiKeyEnvs), FORCE_COLOR: '0', E2E_APP: '1', // E2E_APP: playwright.config.ts does not load .env
-        REPLAY_W: String(width), REPLAY_H: String(height), REPLAY_DEVICE: device ?? '', REPLAY_CDP_PORT: String(REPLAY_CDP_PORT),
+        REPLAY_W: String(width), REPLAY_H: String(height), REPLAY_DEVICE: device ?? '', REPLAY_CDP_PORT: String(cdpPort), REPLAY_OUTPUT: outputDir,
         REPLAY_REPORT: reportFile, REPLAY_SLOWMO: String(slowMo), REPLAY_STORAGE: sessionFile ?? '', REPLAY_TESTDIR: testDir ?? '',
         E2E_VARS: JSON.stringify(vars), E2E_ENV: envName, E2E_DATA_DIR: testDataDir ?? '', // tests/support/vars.ts; empty = the data/ folder next to the test
         E2E_DB_URL: dbUrl ?? '', // tests/support/db.ts: the project's database in this environment
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    signal.addEventListener('abort', () => { try { process.kill(-child.pid, 'SIGTERM'); } catch {} });
+    signal.addEventListener('abort', () => killTree(child.pid));
     let buf = '';
     const onData = d => {
       buf += d;

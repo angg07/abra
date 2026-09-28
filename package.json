@@ -9,9 +9,8 @@
     "report": "playwright show-report",
     "ui": "playwright test --ui",
     "app": "node app/server.mjs",
-    "setup": "node node_modules/@playwright/mcp/node_modules/playwright/cli.js install chromium",
-    "test:app": "node --test app/test/*.test.mjs",
-    "reset-password": "node app/reset-password.mjs"
+    "setup": "node app/setup.mjs",
+    "test:app": "node --test --test-concurrency=1 app/test/*.test.mjs"
   },
   "keywords": [],
   "author": "",

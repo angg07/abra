@@ -41,12 +41,12 @@ export function listRuns(projects) {
   const list = [].concat(projects ?? []);
   if (projects !== undefined && !list.length) return [];
   const rows = list.length
-    ? db.prepare(`SELECT r.data, u.name AS by FROM runs r LEFT JOIN users u ON u.id = r.user_id WHERE r.project IN (${list.map(() => '?').join(',')}) ORDER BY r.started DESC`).all(...list)
-    : db.prepare('SELECT r.data, u.name AS by FROM runs r LEFT JOIN users u ON u.id = r.user_id ORDER BY r.started DESC').all();
-  return rows.map(({ data, by }) => {
+    ? db.prepare(`SELECT data FROM runs WHERE project IN (${list.map(() => '?').join(',')}) ORDER BY started DESC`).all(...list)
+    : db.prepare('SELECT data FROM runs ORDER BY started DESC').all();
+  return rows.map(({ data }) => {
     const { steps, replaySteps, log, text, script, issues, original, ...r } = JSON.parse(data);
     return {
-      ...r, by: by ?? undefined, hasScript: Boolean(script),
+      ...r, hasScript: Boolean(script),
       issueCount: (issues ?? []).filter(isAppError).length, // problems from the app under test
       a11yCount: (issues ?? []).filter(isA11y).length,
     };

@@ -28,62 +28,20 @@ const icon = name => `<svg class="i" aria-hidden="true"><use href="#i-${name}"/>
 // environments a run may use: production ones only feed the block list
 const testEnvs = () => (settings.environments ?? []).filter(e => !e.production);
 
-/* ---------- signed-in user and what their role allows ---------- */
-let me = null, serverMode = false;
-const RANK = { viewer: 0, tester: 1, maintainer: 2 };
-const canDo = need => need === 'admin' ? Boolean(me?.admin) : (RANK[me?.admin ? 'maintainer' : project?.role] ?? -1) >= RANK[need];
-// elements marked data-need="tester|maintainer|admin" show only when allowed; data-local: not on a shared server
-// data-proj: only inside a project (the sidebar's sections)
+// elements marked data-proj show only inside a project (the sidebar's sections)
 function applyRoles() {
-  for (const el of document.querySelectorAll('[data-need], [data-local], [data-proj]'))
-    el.hidden = (el.dataset.need && !canDo(el.dataset.need)) || (serverMode && el.hasAttribute('data-local')) || (el.hasAttribute('data-proj') && !project);
+  for (const el of document.querySelectorAll('[data-proj]')) el.hidden = !project;
 }
 
-let authMode = 'login', authState = {};
-function showAuth(mode) {
-  authMode = mode;
-  $('authView').hidden = false; $('shell').hidden = true;
-  for (const el of $('authForm').querySelectorAll('[data-mode]')) el.hidden = !el.dataset.mode.split(' ').includes(mode);
-  $('authCodeWrap').hidden = mode !== 'setup' || !authState.setupNeedsCode;
-  $('authIntro').textContent = { setup: 'First start: create the admin account. Admins add the other users later.', login: 'Sign in to continue.', password: 'Choose your own password before you continue.' }[mode];
-  $('authSubmit').textContent = { setup: 'Create admin account', login: 'Sign in', password: 'Save password' }[mode];
-  $('authErr').textContent = '';
-  $('authForm').querySelector('label:not([hidden]) input')?.focus();
-}
-$('authForm').onsubmit = async e => {
-  e.preventDefault();
-  const v = id => $(id).value;
-  try {
-    if (authMode !== 'login' && v('authNew') !== v('authRepeat')) throw new Error('The two new passwords are not the same');
-    if (authMode === 'setup') await api('/auth/setup', { method: 'POST', body: JSON.stringify({ name: v('authName'), email: v('authEmail'), password: v('authNew'), code: v('authCode').trim() }) });
-    if (authMode === 'login') await api('/auth/login', { method: 'POST', body: JSON.stringify({ email: v('authEmail'), password: v('authPass') }) });
-    if (authMode === 'password') await api('/auth/password', { method: 'POST', body: JSON.stringify({ current: v('authCurrent'), next: v('authNew') }) });
-    for (const id of ['authPass', 'authCurrent', 'authNew', 'authRepeat', 'authCode']) $(id).value = '';
-    boot();
-  } catch (err) { $('authErr').textContent = err.message; }
-};
-$('signOut').onclick = async () => { await api('/auth/logout', { method: 'POST' }); location.hash = ''; location.reload(); };
-$('changePw').onclick = () => showAuth('password');
-
-// start: who is signed in decides what shows; never a blank page
+// start: never a blank page
 window.__appStarted = true; // index.html shows a message when this never gets set
 async function boot() {
   try {
-    authState = await api('/auth/me');
-    me = authState.user; serverMode = authState.serverMode;
-    if (!me) return showAuth(authState.setup ? 'setup' : 'login');
-    if (me.mustChange) return showAuth('password');
-    $('authView').hidden = true; $('shell').hidden = false;
-    $('meName').textContent = me.name; $('meName').title = `${me.email}${me.admin ? ' (admin)' : ''}`;
-    $('meAvatar').textContent = me.name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
     await loadSettings();
     $('model').value = saved.model || '';
-    startLive();
     route();
   } catch (err) {
-    $('authView').hidden = false;
-    $('authIntro').textContent = `The app could not load: ${err.message}. Check that the server is running, then reload this page.`;
-    for (const el of $('authForm').querySelectorAll('label, button')) el.hidden = true;
+    $('projectList').innerHTML = `<div class="emptybox"><strong>The app could not load</strong>${esc(err.message)}. Check that the server is running (npm run app), then reload this page.</div>`;
   }
 }
 
@@ -123,11 +81,9 @@ function renderHome() {
           <span class="strip" aria-label="Last ${p.recent.length} runs">${[...p.recent].reverse().map(st => `<i class="${esc(st)}" title="${esc(STATUS[st] ?? st)}"></i>`).join('')}</span>
         </span>
       </button>
-      ${me.admin || p.role === 'maintainer' ? `<button type="button" class="icon-btn edit" data-edit="${esc(p.id)}" aria-label="Edit ${esc(p.name)}" title="Edit project">${icon('edit')}</button>` : `<span class="role-tag">${esc(p.role)}</span>`}
+      ${`<button type="button" class="icon-btn edit" data-edit="${esc(p.id)}" aria-label="Edit ${esc(p.name)}" title="Edit project">${icon('edit')}</button>`}
     </article>`;
-  $('projectList').innerHTML = projects.map(card).join('') + (me.admin
-    ? `<article class="project new"><button type="button" class="open" data-new>${icon('plus')}<strong>New project</strong><span>For another application you test</span></button></article>`
-    : projects.length ? '' : `<div class="emptybox"><strong>No projects yet</strong>An admin or a project maintainer adds you to a project.</div>`);
+  $('projectList').innerHTML = projects.map(card).join('') + `<article class="project new"><button type="button" class="open" data-new>${icon('plus')}<strong>New project</strong><span>For another application you test</span></button></article>`;
   applyRoles();
 }
 $('projectList').onclick = e => {
@@ -145,8 +101,8 @@ $('projSwitch').onclick = e => {
   if (!$('projMenu').hidden) return closeMenu();
   $('projMenu').innerHTML = [
     `<button type="button" role="menuitem" data-go="" aria-current="${!project}">${icon('grid')}All projects</button>`, '<hr>',
-    ...projects.map(p => `<button type="button" role="menuitem" data-go="${esc(p.id)}" aria-current="${p.id === project?.id}">${icon('folder')}${esc(p.name)}${me.admin ? '' : `<span class="role">${esc(p.role)}</span>`}</button>`),
-    ...(me.admin ? ['<hr>', `<button type="button" role="menuitem" data-new>${icon('plus')}New project</button>`] : []),
+    ...projects.map(p => `<button type="button" role="menuitem" data-go="${esc(p.id)}" aria-current="${p.id === project?.id}">${icon('folder')}${esc(p.name)}</button>`),
+    '<hr>', `<button type="button" role="menuitem" data-new>${icon('plus')}New project</button>`,
   ].join('');
   $('projMenu').hidden = false; $('projSwitch').setAttribute('aria-expanded', 'true');
   $('projMenu').querySelector('[aria-current="true"]')?.focus();
@@ -175,7 +131,7 @@ async function enterProject() {
     const want = ps[sel.id] ?? project.env;
     sel.value = want && [...sel.options].some(o => o.value === want) ? want : settings.activeEnv || '';
   }
-  show(canDo('tester') ? 'ai' : 'history'); // viewers only look at results
+  show('ai');
 }
 
 // New / edit project dialog
@@ -189,36 +145,42 @@ function editProject(p) {
   $('projEnv').value = p?.env ?? '';
   $('projDb').replaceChildren(...testEnvs().map(e => dbRow(e.name, p?.db?.[e.name], p?.dbPassSet?.[e.name])));
   if (!testEnvs().length) $('projDb').innerHTML = '<p class="muted">Add an environment first (Settings > Environments).</p>';
-  $('projDelete').hidden = !p || !me.admin; $('projErr').textContent = '';
-  $('projPeople').hidden = !p; // members and sessions exist once the project does
-  if (p) { renderMembers(); renderProjSessions(); }
+  $('projDelete').hidden = $('projExport').hidden = !p; $('projErr').textContent = '';
+  $('projPeople').hidden = !p; // saved sessions exist once the project does
+  if (p) renderProjSessions();
   $('projDlg').showModal();
 }
 
-// Members: changes apply right away (no Save needed)
-async function renderMembers() {
-  const id = editingProject.id;
-  const [members, everyone] = await Promise.all([api(`/projects/${id}/members`), api('/users/directory')]);
-  const roleSel = m => `<select class="field" data-role style="width:auto">${['maintainer', 'tester', 'viewer'].map(r => `<option value="${r}"${m.role === r ? ' selected' : ''}>${r[0].toUpperCase() + r.slice(1)}</option>`).join('')}</select>`;
-  $('memberList').innerHTML = members.length ? members.map(m => `<div class="item" data-uid="${m.id}" style="grid-template-columns:1fr auto auto; align-items:center">
-      <div><div class="title">${esc(m.name)}</div><div class="sub">${esc(m.email)}</div></div>${roleSel(m)}<button type="button" class="link danger" data-remove>Remove</button></div>`).join('')
-    : '<p class="muted" style="padding:10px 14px; margin:0">No members yet. Admins can open every project without being members.</p>';
-  const others = everyone.filter(u => !members.some(m => m.id === u.id));
-  $('memberAdd').replaceChildren(...others.map(u => new Option(`${u.name} (${u.email})`, u.id)));
-  $('memberAddBtn').disabled = !others.length;
-}
-const setMember = async (userId, role) => {
-  try { await api(`/projects/${editingProject.id}/members`, { method: 'PUT', body: JSON.stringify({ userId, role }) }); $('projErr').textContent = ''; }
-  catch (err) { $('projErr').textContent = err.message; }
-  renderMembers();
+
+/* ---------- share a project as a file ---------- */
+$('projExport').onclick = () => { location.href = `/projects/${encodeURIComponent(editingProject.id)}/export`; };
+$('importProject').onclick = () => $('importFile').click();
+$('importFile').onchange = async () => {
+  const f = $('importFile').files[0]; $('importFile').value = '';
+  if (!f) return;
+  try {
+    const bundle = JSON.parse(await f.text());
+    const names = Object.keys(bundle.files ?? {});
+    if (!confirm(`Import "${bundle.project?.name ?? f.name}" (${names.length} files)?\n\n${names.slice(0, 20).join('\n')}${names.length > 20 ? '\n…' : ''}\n\nTest files are code that runs on this computer: import only files from people you trust.`)) return;
+    const send = mode => fetch('/projects/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bundle, mode }) });
+    let r = await send();
+    if (r.status === 409) {
+      const { conflict, suggestion } = await r.json();
+      const overwrite = confirm(`A project "${conflict}" already exists.\n\nOK: overwrite its tests (history and sessions stay)\nCancel: import as a new project "${suggestion}"`);
+      r = await send(overwrite ? 'overwrite' : 'new');
+    }
+    if (!r.ok) throw new Error(await r.text());
+    const s = await r.json();
+    const todo = [
+      s.missingSecrets.length && `Secrets to add (Settings → Secrets): ${s.missingSecrets.join(', ')}`,
+      s.unboundSecrets.length && `Secrets to give this project, if you trust it (Settings → Secrets): ${s.unboundSecrets.join(', ')}`,
+      s.missingVars.length && `Environment values to add (Settings → Environments): ${s.missingVars.join(', ')}`,
+      s.skippedDb.length && `Database settings skipped for environments you do not have: ${s.skippedDb.join(', ')}`,
+    ].filter(Boolean);
+    toast(`Imported ${s.files} files into "${s.id}".${todo.length ? ' ' + todo.join('. ') + '.' : ''}`);
+    location.hash = `#/p/${s.id}`; route();
+  } catch (err) { toast(`Import failed: ${err.message}`); }
 };
-$('memberList').onchange = e => { if (e.target.matches('[data-role]')) setMember(Number(e.target.closest('[data-uid]').dataset.uid), e.target.value); };
-$('memberList').onclick = e => {
-  if (!e.target.matches('[data-remove]')) return;
-  const row = e.target.closest('[data-uid]');
-  if (confirm(`Remove ${row.querySelector('.title').textContent} from ${editingProject.name}?`)) setMember(Number(row.dataset.uid), null);
-};
-$('memberAddBtn').onclick = () => setMember(Number($('memberAdd').value), $('memberRole').value);
 
 function renderProjSessions() {
   const list = editingProject.sessions ?? [];
@@ -330,6 +292,9 @@ function toast(text) {
 let origin = 'ai'; // where the current run page was opened from
 let lastPage = 'home'; // where Settings returns to
 function show(view) {
+  // leaving Settings with unsaved changes: ask first
+  if (view !== 'settings' && !$('view-settings').hidden && settingsDirty().length
+    && !confirm(`You have unsaved changes in ${settingsDirty().join(', ')}. Leave without saving?`)) return;
   for (const v of ['home', 'ai', 'record', 'tests', 'workflows', 'history', 'settings', 'run']) (v === 'home' ? $('home') : $(`view-${v}`)).hidden = v !== view;
   const navView = view === 'run' ? origin : view;
   for (const b of document.querySelectorAll('nav.views button')) b.setAttribute('aria-current', b.dataset.view === navView ? 'page' : 'false');
@@ -342,16 +307,16 @@ function show(view) {
   $('scroll').scrollTop = 0; $('side').classList.remove('open');
 }
 // a run may go on while you look elsewhere; switching project waits for it
-for (const b of document.querySelectorAll('nav.views button')) b.onclick = () => (b.dataset.view === 'home' ? (location.hash = '') : show(b.dataset.view));
+// Projects: the hash may already be empty (no project open), then there is no hashchange to route on
+for (const b of document.querySelectorAll('nav.views button')) b.onclick = () => (b.dataset.view !== 'home' ? show(b.dataset.view) : location.hash ? (location.hash = '') : route());
 
 /* ---------- live view ---------- */
 let live;
-function startLive() { // only for a signed-in user; it shows runs of their own projects only
-  if (live) return;
-  live = new EventSource('/screen');
+function startLive(runId) { // the browser of one run; the server checks the run is in your projects
+  live?.close();
+  live = new EventSource('/screen?' + new URLSearchParams({ run: runId }));
   live.addEventListener('frame', e => { $('frame').src = 'data:image/jpeg;base64,' + JSON.parse(e.data); $('stage').classList.add('has-frame'); });
   live.addEventListener('url', e => { $('addr').textContent = JSON.parse(e.data); });
-  live.addEventListener('reset', () => { $('stage').classList.remove('has-frame'); $('addr').textContent = 'about:blank'; });
 }
 
 /* ---------- settings data (providers, sessions, secrets) ---------- */
@@ -432,7 +397,7 @@ function openRunPage({ task, who, kind }) {
 }
 function setRunButtons(state) { // running | done | history
   $('stop').hidden = state !== 'running'; $('stop').disabled = false;
-  $('back').hidden = state === 'running'; $('again').hidden = state === 'running' || !canDo('tester');
+  $('back').hidden = state === 'running'; $('again').hidden = state === 'running';
 }
 
 // the stage: the live browser during a run, or the video of a finished run opened from History
@@ -457,12 +422,14 @@ function start(kind, params) {
   setStatus('Running 0:00', 'run');
   timer = setInterval(() => setStatus(`Running ${clock()}`, 'run'), 1000);
 
+  $('stage').classList.remove('has-frame'); $('addr').textContent = 'about:blank'; // this run's own browser comes next
   es = new EventSource(`/${{ ai: 'run', replay: 'replay', fix: 'fix', workflow: 'workflow-run' }[kind]}?` + new URLSearchParams({ ...params, project: project.id }));
   current.issues = []; renderIssues([]);
   let lastNote;
-  es.addEventListener('queued', e => { current.queued = true; clearInterval(timer); setStatus(`Waiting for the current run (#${JSON.parse(e.data).position} in line)`, 'run'); });
+  es.addEventListener('queued', e => { current.queued = true; clearInterval(timer); setStatus(`Waiting for a free run slot (#${JSON.parse(e.data).position} in line)`, 'run'); });
   es.addEventListener('run', e => {
     current.id = JSON.parse(e.data).id;
+    startLive(current.id);
     if (current.queued) { current.queued = false; started = Date.now(); timer = setInterval(() => setStatus(`Running ${clock()}`, 'run'), 1000); }
   });
   es.addEventListener('text', e => { const t = JSON.parse(e.data); lastNote = { el: addNote(t), text: t }; lastNote.el.scrollIntoView({ block: 'nearest' }); });
@@ -506,7 +473,7 @@ function finish() {
 $('stop').onclick = () => {
   if (current?.queued) { finish(); setStatus('Removed from the queue'); return; } // not ours to stop: someone else's run is going
   $('stop').disabled = true; setStatus('Stopping…', 'run');
-  fetch('/stop', { method: 'POST' }).catch(() => finish());
+  fetch(`/stop?${new URLSearchParams({ run: current.id })}`, { method: 'POST' }).catch(() => finish());
 };
 $('back').onclick = () => show(origin);
 $('again').onclick = () => { if (current) start(current.kind, current.params); };
@@ -557,7 +524,7 @@ function renderResult(run, { live = false } = {}) {
     det.querySelector('pre').textContent = JSON.stringify(run.outputs, null, 2);
     r.append(det);
   }
-  if (total) r.insertAdjacentHTML('beforeend', `<table class="tests"><tbody>${run.tests.map(t => `<tr><td><b style="color:var(--${t.status === 'passed' ? 'pass' : t.status === 'skipped' ? 'muted' : 'fail'})">${t.status === 'passed' ? '✓' : t.status === 'skipped' ? '–' : '✗'}</b> ${esc(t.title)}${t.row ? ` <span class="tag">row ${t.row}</span>` : ''}${t.attempt ? ` <span class="tag">run ${t.attempt}</span>` : ''}<br><span class="muted">${esc(t.file)}</span>${t.error ? `<details><summary>Show error</summary><pre class="code">${esc(t.error)}</pre></details>` : ''}${t.visual?.length ? `<div class="visual">${t.visual.map(v => `<figure><a href="/visual/${esc(run.id)}/${esc(v.file)}" target="_blank" rel="noopener"><img src="/visual/${esc(run.id)}/${esc(v.file)}" alt="${esc(v.kind)} screenshot"></a><figcaption>${{ expected: 'Expected (baseline)', actual: 'Actual (now)', diff: 'Difference' }[v.kind]}</figcaption></figure>`).join('')}</div>` : ''}${t.status !== 'passed' && run.kind === 'replay' && canDo('tester') ? `<div class="actions" style="margin-top:6px">${t.visual?.length ? `<button type="button" class="btn ghost small" data-accept="${esc(t.file.replace(/\.spec\.ts$/, ''))}">Accept as new baseline</button>` : ''}<button type="button" class="btn small" data-fix="${esc(t.file.replace(/\.spec\.ts$/, ''))}">Fix with AI</button></div>` : ''}</td><td>${(t.ms / 1000).toFixed(1)} s</td></tr>`).join('')}</tbody></table>`);
+  if (total) r.insertAdjacentHTML('beforeend', `<table class="tests"><tbody>${run.tests.map(t => `<tr><td><b style="color:var(--${t.status === 'passed' ? 'pass' : t.status === 'skipped' ? 'muted' : 'fail'})">${t.status === 'passed' ? '✓' : t.status === 'skipped' ? '–' : '✗'}</b> ${esc(t.title)}${t.row ? ` <span class="tag">row ${t.row}</span>` : ''}${t.attempt ? ` <span class="tag">run ${t.attempt}</span>` : ''}<br><span class="muted">${esc(t.file)}</span>${t.error ? `<details><summary>Show error</summary><pre class="code">${esc(t.error)}</pre></details>` : ''}${t.visual?.length ? `<div class="visual">${t.visual.map(v => `<figure><a href="/visual/${esc(run.id)}/${esc(v.file)}" target="_blank" rel="noopener"><img src="/visual/${esc(run.id)}/${esc(v.file)}" alt="${esc(v.kind)} screenshot"></a><figcaption>${{ expected: 'Expected (baseline)', actual: 'Actual (now)', diff: 'Difference' }[v.kind]}</figcaption></figure>`).join('')}</div>` : ''}${t.status !== 'passed' && run.kind === 'replay' ? `<div class="actions" style="margin-top:6px">${t.visual?.length ? `<button type="button" class="btn ghost small" data-accept="${esc(t.file.replace(/\.spec\.ts$/, ''))}">Accept as new baseline</button>` : ''}<button type="button" class="btn small" data-fix="${esc(t.file.replace(/\.spec\.ts$/, ''))}">Fix with AI</button></div>` : ''}</td><td>${(t.ms / 1000).toFixed(1)} s</td></tr>`).join('')}</tbody></table>`);
   if (run.video && live) r.insertAdjacentHTML('beforeend', `<video src="/recordings/${esc(run.video)}" controls preload="metadata"></video>`); // from History it plays on the stage
   for (const b of r.querySelectorAll('[data-fix]')) b.onclick = () => fixTest(run.id, b.dataset.fix);
   // the screen changed on purpose (new design): make the current screen the new reference
@@ -579,7 +546,7 @@ function renderResult(run, { live = false } = {}) {
   actions.innerHTML = `<a class="btn ghost small" href="/report/${esc(run.id)}">Download HTML report</a>${run.video ? `<a class="btn ghost small" href="/recordings/${esc(run.video)}" download>Download video</a>` : ''}${run.guide ? `<a class="btn small" href="/guides/${esc(run.guide)}" target="_blank" rel="noopener">Open PDF guide</a>` : ''}`;
   r.append(actions);
 
-  if (run.kind === 'fix' && run.script && canDo('tester')) {
+  if (run.kind === 'fix' && run.script) {
     const name = run.testNames[0];
     const save = document.createElement('button'); save.type = 'button'; save.className = run.status === 'pass' ? 'btn small' : 'btn ghost small';
     save.textContent = run.status === 'pass' ? `Save fix to tests/${run.project}/${name}.spec.ts` : 'Save anyway (not verified)';
@@ -598,7 +565,7 @@ function renderResult(run, { live = false } = {}) {
     view.onclick = () => { pre.hidden = !pre.hidden; view.textContent = pre.hidden ? 'Show script' : 'Hide script'; };
     actions.append(copy, view);
     r.append(pre);
-    if (canDo('tester')) r.append(inlineForm('Save as test', 'test-name, e.g. login-and-checkout', slugify((run.task ?? '').split('\n')[0]).slice(0, 40), async name => {
+    r.append(inlineForm('Save as test', 'test-name, e.g. login-and-checkout', slugify((run.task ?? '').split('\n')[0]).slice(0, 40), async name => {
       const { name: saved } = await api(withProject('/tests'), { method: 'POST', body: JSON.stringify({ name, runId: run.id }) });
       return `Saved as tests/${project.id}/${saved}.spec.ts. Replay it from the Saved tests tab.`;
     }));
@@ -606,7 +573,7 @@ function renderResult(run, { live = false } = {}) {
   // the AI's browser stays open after a live run, so its login can be captured now
   if (live && run.kind === 'ai' && run.status !== 'error') {
     r.append(inlineForm('Save login session', 'session name, e.g. admin-login', slugify(new URL(run.url).hostname.replace(/^www\./, '').split('.')[0]), async name => {
-      const s = await api('/sessions', { method: 'POST', body: JSON.stringify({ project: project.id, name }) });
+      const s = await api('/sessions', { method: 'POST', body: JSON.stringify({ project: project.id, name, run: run.id }) });
       await refreshProject();
       return `Session "${s.name}" saved (${s.cookies} cookies). Pick it under "Start with a login session".`;
     }));
@@ -663,17 +630,17 @@ async function loadTests() {
     $('testList').innerHTML = `<div class="list">${tests.map(t => {
       const last = lastByTest[t.name];
       return `<div class="item row-item" data-name="${esc(t.name)}">
-        ${canDo('tester') ? `<input type="checkbox" aria-label="Select ${esc(t.name)}">` : '<span></span>'}
+        <input type="checkbox" aria-label="Select ${esc(t.name)}">
         <div><div class="title">${esc(t.name)}</div>
           <div class="sub">${esc(t.titles.join(', ') || 'untitled')}</div>
           <div class="meta">Changed ${esc(ago(t.modified))}${last ? `, last run ${esc(ago(last.started))}` : ''}${t.dataRows ? `, data set of ${t.dataRows} row${t.dataRows > 1 ? 's' : ''}` : ''}</div>
         </div>
         <span class="strip" aria-label="Last ${(recent[t.name] ?? []).length} runs">${[...(recent[t.name] ?? [])].reverse().map(st => `<i class="${esc(st)}" title="${esc(STATUS[st] ?? st)}"></i>`).join('')}</span>
         <div class="ractions">
-          ${canDo('tester') ? `<button type="button" class="icon-btn" data-act="edit" aria-label="Edit ${esc(t.name)}" title="Edit script and data set">${icon('edit')}</button>` : ''}
+          <button type="button" class="icon-btn" data-act="edit" aria-label="Edit ${esc(t.name)}" title="Edit script and data set">${icon('edit')}</button>
           <button type="button" class="icon-btn" data-act="code" aria-label="Show code of ${esc(t.name)}" title="Show code" aria-pressed="false">${icon('code')}</button>
-          ${canDo('maintainer') ? `<button type="button" class="icon-btn danger" data-act="del" aria-label="Delete ${esc(t.name)}" title="Delete">${icon('trash')}</button>` : ''}
-          ${canDo('tester') ? `<button type="button" class="btn small" data-act="run">${icon('play')}Run</button>` : ''}
+          <button type="button" class="icon-btn danger" data-act="del" aria-label="Delete ${esc(t.name)}" title="Delete">${icon('trash')}</button>
+          <button type="button" class="btn small" data-act="run">${icon('play')}Run</button>
         </div>
         <pre class="code" hidden></pre>
       </div>`;
@@ -742,7 +709,7 @@ async function loadHistory() {
 function renderHistory() {
   const q = $('histSearch').value.trim().toLowerCase();
   const runs = historyRuns.filter(r => (historyFilter === 'all' || (historyFilter === 'pass' ? r.status === 'pass' : r.status !== 'pass'))
-    && (!q || `${r.task} ${r.by ?? ''} ${r.provider ?? ''}`.toLowerCase().includes(q)));
+    && (!q || `${r.task} ${r.provider ?? ''}`.toLowerCase().includes(q)));
   if (!historyRuns.length) { $('historyList').innerHTML = `<div class="emptybox"><strong>No history yet</strong>Every AI run, replay and workflow is recorded here, with its video and report.</div>`; return; }
   if (!runs.length) { $('historyList').innerHTML = `<div class="emptybox"><strong>No runs match</strong>Change the search or the filter.</div>`; return; }
   $('historyList').innerHTML = `<div class="list">${runs.map(r => {
@@ -750,7 +717,7 @@ function renderHistory() {
     return `<button type="button" class="item" data-id="${esc(r.id)}">
       <span class="kind ${esc(r.status)}" title="${esc(STATUS[r.status] ?? r.status)}">${icon(ic)}</span>
       <span><span class="title" style="display:block">${esc((r.task ?? '').split('\n')[0].slice(0, 140))}</span>
-        <span class="sub" style="display:block">${esc(kind === 'Replay' && r.testNames?.length > 1 ? 'Suite' : kind)}, ${esc(ago(r.started))}, ${r.secs ?? 0} s${r.by ? `, by ${esc(r.by)}` : r.schedule ? ', scheduled' : ''}${r.provider ? `, ${esc(r.provider)}` : ''}</span></span>
+        <span class="sub" style="display:block">${esc(kind === 'Replay' && r.testNames?.length > 1 ? 'Suite' : kind)}, ${esc(ago(r.started))}, ${r.secs ?? 0} s${r.schedule ? ', scheduled' : ''}${r.provider ? `, ${esc(r.provider)}` : ''}</span></span>
       <span class="tags"><span class="tag ${esc(r.status)}">${esc(STATUS[r.status] ?? r.status)}</span>${r.issueCount ? `<span class="tag fail">${r.issueCount} app error${r.issueCount > 1 ? 's' : ''}</span>` : ''}${r.a11yCount ? `<span class="tag">♿ ${r.a11yCount}</span>` : ''}</span>
     </button>`;
   }).join('')}</div>`;
@@ -797,7 +764,7 @@ function addBlockResult(b) {
   $('steps').append(li);
   return li;
 }
-const studio = createStudio({ $, api, esc, project: () => project, canDo, onRun: (id, wf) => runWorkflow(id, wf), onClose: () => loadWorkflows() });
+const studio = createStudio({ $, api, esc, project: () => project, onRun: (id, wf) => runWorkflow(id, wf), onClose: () => loadWorkflows() });
 let workflows = [];
 async function loadWorkflows() {
   const [list, history] = await Promise.all([api(withProject('/workflows')), api(withProject('/history'))]);
@@ -813,12 +780,12 @@ async function loadWorkflows() {
         <div class="meta">${w.blocks} block${w.blocks === 1 ? '' : 's'}${w.params?.length ? `, asks for ${w.params.map(x => esc(x.name)).join(', ')}` : ''}, changed ${esc(ago(w.modified))}</div></div>
       <span class="strip" aria-label="Last ${recent.length} runs">${[...recent].reverse().map(st => `<i class="${esc(st)}" title="${esc(STATUS[st] ?? st)}"></i>`).join('')}</span>
       <div class="ractions">
-        <button type="button" class="icon-btn" data-act="open" aria-label="${canDo('tester') ? 'Edit' : 'View'} ${esc(w.name)}" title="${canDo('tester') ? 'Open in Workflow Studio' : 'View'}">${icon(canDo('tester') ? 'edit' : 'code')}</button>
-        ${canDo('maintainer') ? `<button type="button" class="icon-btn danger" data-act="del" aria-label="Delete ${esc(w.name)}" title="Delete">${icon('trash')}</button>` : ''}
-        ${canDo('tester') ? `<button type="button" class="btn small" data-act="run">${icon('play')}Run</button>` : ''}
+        <button type="button" class="icon-btn" data-act="open" aria-label="${'Edit'} ${esc(w.name)}" title="${'Open in Workflow Studio'}">${icon('edit')}</button>
+        <button type="button" class="icon-btn danger" data-act="del" aria-label="Delete ${esc(w.name)}" title="Delete">${icon('trash')}</button>
+        <button type="button" class="btn small" data-act="run">${icon('play')}Run</button>
       </div>
     </div>`;
-  }).join('')}</div>` : `<div class="emptybox"><strong>No workflows yet</strong>${canDo('tester') ? 'Click "New workflow" and add blocks.' : 'A tester of this project can create one.'}</div>`;
+  }).join('')}</div>` : `<div class="emptybox"><strong>No workflows yet</strong>Click "New workflow" and add blocks.</div>`;
 }
 $('wfNew').onclick = () => studio.open(null);
 $('wfList').onclick = async e => {
@@ -941,64 +908,75 @@ function syncDevice() {
 }
 $('recDevice').onchange = syncDevice;
 
-function selectTab(btn) { for (const t of document.querySelectorAll('.tab')) { t.setAttribute('aria-selected', String(t === btn)); $(t.getAttribute('aria-controls')).hidden = t !== btn; } }
-for (const t of document.querySelectorAll('.tab')) t.onclick = () => selectTab(t);
+function selectTab(btn) { for (const t of document.querySelectorAll('#sf .tab')) { t.setAttribute('aria-selected', String(t === btn)); $(t.getAttribute('aria-controls')).hidden = t !== btn; } }
+for (const t of document.querySelectorAll('#sf .tab')) t.onclick = () => selectTab(t);
 
 // One collapsible row per provider; API keys are write-only (server never returns them)
 function providerRow(p = { engine: 'openai-compatible' }, open = false) {
   const d = document.createElement('details');
   d.className = 'prov'; d.open = open;
   d.dataset.id = p.id || ''; d.dataset.apiKeyEnv = p.apiKeyEnv || '';
-  const needsKey = p.apiKeyEnv && !p.ready;
+  const cc = p.engine === 'claude-code';
+  const needsKey = !cc && p.apiKeyEnv && !p.ready;
+  const status = cc ? (p.account ? ['ok', 'Signed in'] : ['need', 'Not signed in']) : needsKey ? ['need', 'Needs API key'] : ['ok', 'Ready'];
   const keyHint = p.apiKeyEnv ? (p.ready ? 'Saved. Fill in only to replace it.' : 'Not set yet') : 'Leave empty if not needed (e.g. Ollama)';
   d.innerHTML = `
-    <summary><span class="name"></span><span class="badge ${needsKey ? 'need' : 'ok'}">${needsKey ? 'Needs API key' : 'Ready'}</span></summary>
+    <summary><span class="name"></span><span class="badge ${status[0]}">${status[1]}</span></summary>
     <div class="prov-body">
       <div class="grid2">
         <label>Name <input class="field" name="label" required></label>
         <label>Connection <select class="field" name="engine"></select></label>
       </div>
+      <label class="configdir">Config folder <span class="hint">Optional: which Claude account to use, e.g. ~/.claude-2. Empty = your default login.</span><input class="field" name="configDir" placeholder="~/.claude-2" spellcheck="false"></label>
+      <p class="account"></p>
       <label class="baseurl">Base URL <span class="hint">OpenAI-compatible endpoint, e.g. https://api.openai.com/v1</span><input class="field" name="baseURL" type="url"></label>
       <div class="grid2">
         <label>Model default <input class="field" name="model" placeholder="Leave empty for the default"></label>
         <label class="apikey">API key <input class="field" name="apiKey" type="password" autocomplete="off"></label>
       </div>
-      <button type="button" class="danger">Delete this provider</button>
+      <button type="button" class="link danger del"><svg class="i" aria-hidden="true"><use href="#i-trash"/></svg>Delete this provider</button>
     </div>`;
   const q = n => d.querySelector(`[name=${n}]`);
   for (const e of settings.engines) q('engine').add(new Option(e === 'claude-code' ? 'Claude Code on this computer (subscription login)' : 'API (OpenAI-compatible)', e));
   q('label').value = p.label || ''; q('engine').value = p.engine; q('baseURL').value = p.baseURL || ''; q('model').value = p.model || '';
-  q('apiKey').placeholder = keyHint;
+  q('apiKey').placeholder = keyHint; q('configDir').value = p.configDir || '';
+  // whose subscription a Claude Code run uses; known only once saved (the server reads the folder)
+  d.querySelector('.account').innerHTML = p.account ? `Signed in as <b>${esc(p.account.email)}</b>${p.account.org ? ` (${esc(p.account.org)})` : ''}`
+    : p.id ? `Not signed in with this folder. In a terminal run <code>${p.configDir ? `CLAUDE_CONFIG_DIR=${esc(p.configDir)} ` : ''}claude</code> and log in, then reload Settings.` : '';
   d.querySelector('.name').textContent = p.label || 'New provider';
   q('label').oninput = () => { d.querySelector('.name').textContent = q('label').value || 'New provider'; };
-  const sync = () => { const a = q('engine').value === 'openai-compatible'; d.querySelector('.baseurl').hidden = !a; d.querySelector('.apikey').hidden = !a; q('baseURL').required = a; };
+  const sync = () => {
+    const a = q('engine').value === 'openai-compatible';
+    d.querySelector('.baseurl').hidden = !a; d.querySelector('.apikey').hidden = !a; q('baseURL').required = a;
+    d.querySelector('.configdir').hidden = d.querySelector('.account').hidden = a;
+  };
   q('engine').onchange = sync; sync();
-  d.querySelector('.danger').onclick = () => d.remove();
+  d.querySelector('.del').onclick = () => d.remove();
   return d;
 }
-// Secrets: names are shown, values are write-only
 // Secrets: names are shown, values are write-only; each is usable only in the ticked projects
 function secretRow(name = '', scope = []) {
   const row = document.createElement('div');
   row.className = 'secret'; row.dataset.existing = name ? '1' : '';
   row.innerHTML = `<input class="field ph" name="sname" required placeholder="SECRET_NAME" pattern="[A-Za-z][A-Za-z0-9_]*" aria-label="Secret name">
-    <input class="field val" name="svalue" type="password" autocomplete="off" aria-label="Secret value" placeholder="${name ? 'Saved. Fill in to replace it.' : 'Value'}" ${name ? '' : 'required'}>
-    <button type="button" class="link danger">Delete</button>
-    <div class="presets sproj">${projects.map(pr => `<label class="check"><input type="checkbox" name="sproj" value="${esc(pr.id)}"${scope.includes(pr.id) ? ' checked' : ''}> ${esc(pr.name)}</label>`).join('')}${scope.length ? '' : '<span class="hint warn">No project yet: no run can use it</span>'}</div>`;
+    <input class="field val" name="svalue" type="password" autocomplete="off" aria-label="Secret value" placeholder="${name ? 'Saved. Type to replace it.' : 'Value'}" ${name ? '' : 'required'}>
+    <button type="button" class="icon-btn danger" aria-label="Delete secret" title="Delete"><svg class="i" aria-hidden="true"><use href="#i-trash"/></svg></button>
+    <div class="chips sproj" role="group" aria-label="Projects that may use it"><span class="chips-label">Used by</span>${projects.map(pr => `<label class="chip"><input type="checkbox" name="sproj" value="${esc(pr.id)}"${scope.includes(pr.id) ? ' checked' : ''}><span>${esc(pr.name)}</span></label>`).join('') || '<span class="hint">No projects yet</span>'}</div>
+    <p class="hint warn unused"${scope.length ? ' hidden' : ''}>No project picked: no run can use it yet.</p>`;
+  row.querySelector('.sproj').onchange = () => { row.querySelector('.unused').hidden = Boolean(row.querySelector('[name=sproj]:checked')); };
   const n = row.querySelector('[name=sname]');
   n.value = name; n.readOnly = Boolean(name);
   n.oninput = () => { n.value = n.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_'); };
   row.querySelector('button').onclick = () => row.remove();
   return row;
 }
-const openSettings = async () => {
+async function renderSettings() {
   await loadSettings();
   $('serr').textContent = '';
   $('plist').replaceChildren(...settings.providers.map(p => providerRow(p)));
   projects = await api('/projects');
   $('secretList').replaceChildren(...settings.secrets.map(n => secretRow(n, settings.secretProjects?.[n] ?? [])));
   $('envList').replaceChildren(...settings.environments.map(e => envRow(e, e.name === settings.activeEnv)));
-  await renderUsers();
   $('schedList').replaceChildren(...settings.schedules.map(sc => schedRow(sc)));
   $('tgChat').value = settings.notify?.telegramChatId ?? ''; $('notifyMsg').textContent = '';
   $('guideLang').value = settings.guide.lang; $('guideCompany').value = settings.guide.company; $('guideAccent').value = settings.guide.accent;
@@ -1006,57 +984,51 @@ const openSettings = async () => {
   $('recW').value = settings.recording.width; $('recH').value = settings.recording.height; $('recFps').value = settings.recording.fps; for (const d of settings.devices ?? []) if (![...$('recDevice').options].some(o => o.value === d)) $('recDevice').add(new Option(d, d));
   $('recDevice').value = settings.recording.device ?? ''; syncDevice();
   $('recHighlight').checked = settings.recording.highlight !== false; $('recA11y').checked = Boolean(settings.recording.a11y); $('recKeep').value = settings.recording.keep ?? 50;
-  syncPreset(); selectTab($('tabAiBtn')); $('nuMsg').textContent = '';
-  show('settings');
-};
+  syncPreset(); syncEmpty(); $('guideAccentHex').textContent = $('guideAccent').value;
+  baseline = Object.fromEntries(panels().map(pn => [pn.id, panelState(pn)])); refreshDirty();
+}
+const openSettings = async () => { await renderSettings(); selectTab($('tabAiBtn')); show('settings'); };
 for (const b of document.querySelectorAll('.openSettings')) b.onclick = openSettings;
 
-// Users (admin): add, reset a password, make admin, deactivate. Applied right away.
-async function renderUsers() {
-  const users = await api('/users');
-  $('userList').innerHTML = users.map(u => `<div class="item" data-id="${u.id}" style="grid-template-columns:1fr auto">
-      <div><div class="title">${esc(u.name)}${u.admin ? ' <span class="tag">admin</span>' : ''}${u.active ? '' : ' <span class="tag fail">deactivated</span>'}${u.mustChange ? ' <span class="tag">must change password</span>' : ''}</div><div class="sub">${esc(u.email)}</div></div>
-      <div class="tools" style="margin:0">${u.id === me.id ? '<span class="muted">you</span>' : `
-        <button type="button" class="link" data-u="reset">Reset password</button>
-        <button type="button" class="link" data-u="admin">${u.admin ? 'Remove admin' : 'Make admin'}</button>
-        <button type="button" class="link danger" data-u="active">${u.active ? 'Deactivate' : 'Activate'}</button>`}</div>
-    </div>`).join('');
-  $('userList').onclick = async e => {
-    const b = e.target.closest('[data-u]'); if (!b) return;
-    const u = users.find(x => x.id === Number(b.closest('[data-id]').dataset.id));
-    let body;
-    if (b.dataset.u === 'reset') {
-      const pw = prompt(`New first password for ${u.name} (at least 10 characters). They choose their own at next sign-in; their open sessions end now.`);
-      if (!pw) return;
-      body = { password: pw };
-    }
-    if (b.dataset.u === 'admin') { if (!confirm(`${u.admin ? 'Remove admin rights from' : 'Make'} ${u.name}${u.admin ? '' : ' an admin (all projects, users and settings)'}?`)) return; body = { admin: !u.admin }; }
-    if (b.dataset.u === 'active') { if (u.active && !confirm(`Deactivate ${u.name}? They are signed out and cannot sign in until activated again.`)) return; body = { active: !u.active }; }
-    try { await api(`/users/${u.id}`, { method: 'PUT', body: JSON.stringify(body) }); $('nuMsg').className = 'msg ok'; $('nuMsg').textContent = `${u.name}: saved.`; renderUsers(); }
-    catch (err) { $('nuMsg').className = 'msg err'; $('nuMsg').textContent = err.message; }
-  };
+/* unsaved changes: each section compares its fields (and rows) with how it was loaded */
+let baseline = {};
+const panels = () => [...document.querySelectorAll('#sf .tabpanel')];
+const panelState = pn => JSON.stringify([...pn.querySelectorAll('input:not([type=file]), select, textarea')].map(f => [f.name || f.id, f.type === 'checkbox' || f.type === 'radio' ? f.checked : f.value]));
+function settingsDirty() {
+  return panels().filter(pn => baseline[pn.id] !== undefined && panelState(pn) !== baseline[pn.id]).map(pn => $(pn.getAttribute('aria-labelledby')).textContent.trim());
 }
-$('nuAdd').onclick = async () => {
-  try {
-    await api('/users', { method: 'POST', body: JSON.stringify({ name: $('nuName').value, email: $('nuEmail').value, password: $('nuPass').value, admin: $('nuAdmin').checked }) });
-    $('nuMsg').className = 'msg ok'; $('nuMsg').textContent = `${$('nuName').value} can now sign in with ${$('nuEmail').value}. Add them to projects under Projects > Edit > Members.`;
-    for (const id of ['nuName', 'nuEmail', 'nuPass']) $(id).value = ''; $('nuAdmin').checked = false;
-    renderUsers();
-  } catch (err) { $('nuMsg').className = 'msg err'; $('nuMsg').textContent = err.message; }
-};
+function refreshDirty() {
+  const dirty = new Set(settingsDirty());
+  for (const t of document.querySelectorAll('#sf .tab')) {
+    const on = dirty.has(t.textContent.trim()), dot = t.querySelector('.dirty-dot');
+    if (on && !dot) t.insertAdjacentHTML('beforeend', '<span class="dirty-dot" aria-label="unsaved changes"></span>');
+    if (!on) dot?.remove();
+  }
+  $('saveBar').hidden = !dirty.size;
+  $('dirtyList').textContent = dirty.size ? `in ${[...dirty].join(', ')}` : '';
+  if (!dirty.size) $('serr').textContent = '';
+}
+const syncEmpty = () => { $('secretEmpty').hidden = $('secretList').children.length > 0; $('schedEmpty').hidden = $('schedList').children.length > 0; };
+// rows are added and removed by clicks: check after the click has done its work
+for (const ev of ['input', 'change']) $('sf').addEventListener(ev, () => refreshDirty());
+$('sf').addEventListener('click', () => setTimeout(() => { syncEmpty(); refreshDirty(); }));
+$('guideAccent').addEventListener('input', () => { $('guideAccentHex').textContent = $('guideAccent').value; });
+$('discardP').onclick = () => renderSettings();
+addEventListener('beforeunload', e => { if (!$('view-settings').hidden && settingsDirty().length) e.preventDefault(); });
+
 $('addP').onclick = () => { const d = providerRow(undefined, true); $('plist').append(d); d.querySelector('input').focus(); };
 $('addSecret').onclick = () => { const r = secretRow(); $('secretList').append(r); r.querySelector('input').focus(); };
 // Environments: name + name=value lines; one can be the default
 function envRow(env = { name: '', vars: {} }, isDefault = false) {
   const row = document.createElement('div');
   row.className = 'env-row';
-  row.innerHTML = `<div class="row" style="align-items:center">
-      <label style="flex:1">Name <input class="field" name="ename" required placeholder="local, staging, ..."></label>
-      <label class="check" style="margin-top:18px"><input type="radio" name="envDefault"> Default</label>
-      <label class="check" style="margin-top:18px" title="Its addresses are blocked in every test browser"><input type="checkbox" name="eprod"> Production</label>
-      <button type="button" class="link danger" style="margin-top:18px">Delete</button>
+  row.innerHTML = `<div class="env-head">
+      <input class="field env-name" name="ename" required placeholder="Name: local, staging, ..." aria-label="Environment name">
+      <label class="chip"><input type="radio" name="envDefault"><span>Default</span></label>
+      <label class="chip prod" title="Its addresses are blocked in every test browser"><input type="checkbox" name="eprod"><span>Production</span></label>
+      <button type="button" class="icon-btn danger" aria-label="Delete environment" title="Delete"><svg class="i" aria-hidden="true"><use href="#i-trash"/></svg></button>
     </div>
-    <label>Values <textarea class="field code-edit" name="evars" rows="3" placeholder="appUrl=http://myapp.test&#10;adminUrl=http://admin-app.test"></textarea></label>`;
+    <textarea class="field code-edit" name="evars" rows="3" aria-label="Values, one name=value per line" placeholder="appUrl=http://myapp.test&#10;adminUrl=http://admin-app.test"></textarea>`;
   row.querySelector('[name=ename]').value = env.name;
   row.querySelector('[name=evars]').value = Object.entries(env.vars).map(([k, v]) => `${k}=${v}`).join('\n');
   row.querySelector('[name=envDefault]').checked = isDefault;
@@ -1113,7 +1085,7 @@ function schedRow(sc = { name: '', time: '07:00', days: ['Mon', 'Tue', 'Wed', 'T
   d.querySelector('[data-act=del]').onclick = () => d.remove();
   d.querySelector('[data-act=run]').onclick = async ev => {
     await api(`/schedules/${sc.id}/run`, { method: 'POST' });
-    ev.target.textContent = 'Queued: watch it in the live view'; ev.target.disabled = true;
+    ev.target.textContent = 'Queued: see History'; ev.target.disabled = true;
   };
   return d;
 }
@@ -1129,7 +1101,7 @@ const collectSchedules = () => [...$('schedList').children].map(d => {
 });
 // PDF guide logo: uploaded right away (it is a file, not a setting)
 function showLogo(has) {
-  $('guideLogo').hidden = !has; $('guideLogoRemove').hidden = !has;
+  $('guideLogo').hidden = !has; $('guideLogoRemove').hidden = !has; $('guideLogoNone').hidden = has;
   if (has) $('guideLogo').src = `/branding/logo?${Date.now()}`;
 }
 $('guideLogoFile').onchange = () => {
@@ -1165,7 +1137,6 @@ function collectEnvironments() {
   });
   return { environments, activeEnv };
 }
-$('cancelP').onclick = () => show(lastPage);
 $('sf').addEventListener('invalid', e => {
   // reveal the tab / provider row that holds the invalid field
   const panel = e.target.closest('.tabpanel'); if (panel) selectTab($(panel.getAttribute('aria-labelledby')));
@@ -1175,7 +1146,7 @@ $('sf').onsubmit = async e => {
   e.preventDefault();
   const providers = [...$('plist').children].map(d => {
     const v = n => d.querySelector(`[name=${n}]`).value.trim();
-    return { id: d.dataset.id, apiKeyEnv: d.dataset.apiKeyEnv || undefined, label: v('label'), engine: v('engine'), baseURL: v('baseURL'), model: v('model'), apiKey: v('apiKey') };
+    return { id: d.dataset.id, apiKeyEnv: d.dataset.apiKeyEnv || undefined, label: v('label'), engine: v('engine'), baseURL: v('baseURL'), model: v('model'), apiKey: v('apiKey'), configDir: v('configDir') };
   });
   const secrets = [...$('secretList').children].map(r => ({ name: r.querySelector('[name=sname]').value.trim(), value: r.querySelector('[name=svalue]').value }));
   const secretProjects = Object.fromEntries([...$('secretList').children].map(r => [r.querySelector('[name=sname]').value.trim().toUpperCase(), [...r.querySelectorAll('[name=sproj]:checked')].map(c => c.value)]));
@@ -1183,9 +1154,8 @@ $('sf').onsubmit = async e => {
   try {
     const envs = collectEnvironments();
     await api('/settings', { method: 'POST', body: JSON.stringify({ providers, secrets, secretProjects, ...envs, schedules: collectSchedules(), notify: { telegramChatId: $('tgChat').value.trim() }, guide: { lang: $('guideLang').value, company: $('guideCompany').value.trim(), accent: $('guideAccent').value }, recording: { width: +$('recW').value, height: +$('recH').value, fps: +$('recFps').value, highlight: $('recHighlight').checked, keep: +$('recKeep').value, device: $('recDevice').value, a11y: $('recA11y').checked } }) });
-    show(lastPage);
-    await loadSettings();
-    setStatus('Settings saved');
+    await renderSettings(); // fresh from the server: new status badges, signed-in accounts, the saved state as baseline
+    toast('Settings saved');
   } catch (err) { $('serr').textContent = err.message; }
   finally { $('saveP').disabled = false; }
 };

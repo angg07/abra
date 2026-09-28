@@ -3,7 +3,6 @@ test-results/
 playwright-report/
 .env
 .env.*
-app/runs/
 app/recordings/
 # screenshots the AI agent saves during runs
 app/*.png

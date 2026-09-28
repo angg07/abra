@@ -4,7 +4,10 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, createRea
 import { format } from 'node:util';
 import { join, relative } from 'node:path';
 import { engines } from './agents.mjs';
-import * as stage from './stage.mjs';
+import { createStage, portAnswers } from './stage.mjs';
+import { createPortPool, createLimiter, mcpServerFor, idleToClose } from './runs.mjs';
+import { packProject, unpackBundle, missingVars } from './bundle.mjs';
+import { resolveConfigDir, claudeAccount } from './claude-config.mjs';
 import { devices as playwrightDevices } from 'playwright-core';
 import { listTests, readTest, saveTest, deleteTest, testPath, slug, prepareScript, withPlaceholders, readData, saveData, testsDir, projectDir, listProjects, readProject, saveProject, deleteProject, listWorkflows, readWorkflow, saveWorkflow, deleteWorkflow } from './library.mjs';
 import varsCore from './vars-core.cjs';
@@ -12,7 +15,6 @@ import guard from './guard.cjs';
 const { makeResolver, parseCsv, secretsFromEnv } = varsCore;
 import { runTests } from './replay.mjs';
 import { addRun, getRun, listRuns, patchRun, removeRuns, runOfFile, dataDir } from './history.mjs';
-import { userCount, userOf, login, logout, changeOwnPassword, createUser, updateUser, listUsers, can, roleIn, visibleProjects, listMembers, setMember, dropProjectMembers } from './auth.mjs';
 import { buildReport } from './report.mjs';
 import { pruneDir, pruneFolders } from './housekeeping.mjs';
 import { dueSchedules, validSchedules, scheduleState, DAYS } from './scheduler.mjs';
@@ -25,12 +27,12 @@ import { GUIDE_LANGS } from './guide-i18n.mjs';
 import { validWorkflow, fillRefs, loopItems, blockPrompt, readAnswer, SYSTEM as WF_SYSTEM } from './workflow.mjs';
 
 const dir = import.meta.dirname;
+const ports = createPortPool(9400, 9499, portAnswers); // browser debugging ports for runs
 const envPath = join(dir, '..', '.env');
 const providersPath = join(dir, 'providers.json');
 const recordingsDir = join(dir, 'recordings');
 const guidesDir = join(dir, 'guides');
 const sessionsDir = join(dataDir, 'sessions');
-const fixesDir = join(dataDir, 'fixes');
 const visualDir = join(dataDir, 'visual');
 const logoFile = join(dataDir, 'branding', 'logo');
 
@@ -50,8 +52,6 @@ function validGuide({ lang = 'en', company = '', accent = '#2B59C3' } = {}) {
   return { lang, company: String(company).trim(), accent };
 }
 const settingsPath = join(dir, 'settings.json');
-const mcpConfigPath = join(dir, 'mcp.json');
-const mcpServer = JSON.parse(readFileSync(mcpConfigPath, 'utf8')).mcpServers.playwright;
 const PORT = Number(process.env.PORT ?? 4321);
 try { process.loadEnvFile(envPath); } catch {} // API keys and secrets live in the project .env
 
@@ -119,8 +119,14 @@ function validEnvironments(list = [], active = '') {
       if (prod.includes(guard.hostOf(v))) throw new Error(`${e.name}: ${k} is ${guard.hostOf(v)}, a production address. Use a test address, or unmark production.`);
   return { environments: envs, activeEnv: active ? slug(active) : '' };
 }
-// the MCP proxy reads the chosen environment's values from here when an AI run starts
-const writeRunVars = (env, project) => { mkdirSync(dataDir, { recursive: true }); writeFileSync(join(dataDir, 'run-vars.json'), JSON.stringify({ vars: env.vars, env: env.name, secrets: projectSecrets(project) })); };
+// One MCP server per AI run: its own browser port, output folder and environment values.
+// Claude Code reads the config from a file; the OpenAI-compatible engine takes the object.
+function mcpFor(runDir, port, env, project) {
+  const mcpServer = mcpServerFor(port, join(runDir, 'mcp'), { vars: env.vars, env: env.name, secrets: projectSecrets(project) });
+  const mcpConfigPath = join(runDir, 'mcp.json');
+  writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { playwright: mcpServer } }));
+  return { mcpConfigPath, mcpServer };
+}
 
 /* ---------- the application's database, per project and environment ---------- */
 // project.json: db.<env> = { type, host, port, database, user, reset, template }; the password is in .env
@@ -197,7 +203,9 @@ async function testDb(cfg, password) {
 }
 
 const loadProviders = () => JSON.parse(readFileSync(providersPath, 'utf8')); // re-read so Settings changes apply without restart
-const ready = p => !p.apiKeyEnv || Boolean(process.env[p.apiKeyEnv]);
+// the Claude account a claude-code provider runs as (null: that config folder is not signed in, or is gone)
+const accountOf = p => { try { return claudeAccount(resolveConfigDir(p.configDir)); } catch { return null; } };
+const ready = p => (p.engine === 'claude-code' ? Boolean(accountOf(p)) : !p.apiKeyEnv || Boolean(process.env[p.apiKeyEnv]));
 
 // Upsert (or remove, with value === null) KEY=value in .env and apply it to this process
 function saveEnv(key, value) {
@@ -231,6 +239,10 @@ function validProviders(list) {
     ids.add(id);
     if (!engines[p.engine]) throw new Error(`Unknown engine: ${p.engine}`);
     const prov = { id, label: String(p.label || id), engine: p.engine, model: String(p.model || '') };
+    if (p.engine === 'claude-code' && String(p.configDir ?? '').trim()) {
+      resolveConfigDir(p.configDir); // must exist now; kept as typed (~/.claude-2) so the file stays readable
+      prov.configDir = String(p.configDir).trim();
+    }
     if (p.engine === 'openai-compatible') {
       if (!/^https?:\/\/\S+$/.test(p.baseURL || '')) throw new Error(`Invalid Base URL: ${prov.label}`);
       prov.baseURL = p.baseURL;
@@ -290,28 +302,20 @@ function pruneOutputs(keep) {
   for (const r of listRuns()) if (gone.has(r.video) || gone.has(r.guide))
     patchRun(r.id, { ...(gone.has(r.video) && { video: undefined }), ...(gone.has(r.guide) && { guide: undefined }) });
 }
-// Playwright MCP writes a snapshot file per step to app/runs; nothing reads them, so each AI run starts empty
-const clearMcpScratch = () => rmSync(join(dir, 'runs'), { recursive: true, force: true });
 
 /* ---------- runs ---------- */
-// One live stage, so runs take turns. A run that arrives while another is going waits in line (FIFO)
-// instead of being rejected; a client that leaves while waiting drops out of the line.
-let running = false;
-const waiting = [];
-function takeTurn(res) {
-  if (!running && !waiting.length) { running = true; return Promise.resolve(); }
-  const position = waiting.length + 1;
-  res.write(`event: queued\ndata: ${JSON.stringify({ position })}\n\n`);
-  return new Promise((resolve, reject) => {
-    const w = { resolve };
-    waiting.push(w);
-    res.on('close', () => { const i = waiting.indexOf(w); if (i >= 0) { waiting.splice(i, 1); reject(new Error('left the queue')); } });
-  });
+// Up to MAX_RUNS runs at once, each with its own browser (stage). More wait in line (FIFO); a client that
+// leaves while waiting drops out. Runs that reset the same test database never overlap.
+const MAX_RUNS = Math.max(1, Number(process.env.MAX_RUNS) || 2);
+const slots = createLimiter(MAX_RUNS);
+const active = new Map(); // run id -> { stage, project, abort, done, doneAt }: live view, Stop and "Save login session" by id
+const dbLock = (project, env) => { const db = projectDb(project, env.name)?.cfg; return db?.reset ? [`db:${db.host}:${db.port}/${db.database}`] : []; };
+// A finished AI run keeps its browser 5 minutes for "Save login session"; keep at most MAX_RUNS of those
+function trimIdle() {
+  const runs = [...active.entries()].map(([id, r]) => ({ id, done: r.done, doneAt: r.doneAt, browser: r.stage.hasOwnBrowser() }));
+  for (const id of idleToClose(runs, MAX_RUNS)) { active.get(id).stage.close(); active.delete(id); }
 }
-// hand the stage to the next in line (running stays true), or free it
-function releaseTurn() { const next = waiting.shift(); if (next) next.resolve(); else running = false; }
-let currentAbort; // lets POST /stop end the run while the stream stays open for the video
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { console.log(`Stopped (${sig})`); await stage.shutdown(); process.exit(0); }); // Playwright's own handler doesn't exit
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { console.log(`Stopped (${sig})`); await Promise.all([...active.values()].map(r => r.stage.close())); process.exit(0); }); // Playwright's own handler doesn't exit
 
 const SYSTEM = `You are a web automation agent. The user watches the browser live.
 Use the Playwright browser tools to do the user's task, starting at the given URL.
@@ -325,17 +329,27 @@ When done, answer in English (even if the task is written in another language) w
 const stamp = t => new Date(t).toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
 // Shared shell for AI runs and replays: SSE stream, abort, recording, history entry
-let currentRun = null; // { project }: who may watch and stop it
-async function withRun(res, { kind, record, guide, label, project, userId }, body) {
+// Waits for a run slot (and the run's locks); the slot comes back however the run ends
+function withRun(res, opts, body) {
+  const left = new AbortController(); // the client left while waiting in line
+  res.on('close', () => left.abort());
+  const queued = position => res.write(`event: queued\ndata: ${JSON.stringify({ position })}\n\n`);
+  return slots.run(opts.locks ?? [], queued, left.signal, () => runOnStage(res, opts, body));
+}
+async function runOnStage(res, { kind, record, guide, label, project }, body) {
   const send = (type, data) => { if (!res.destroyed) res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); };
-  const abort = currentAbort = new AbortController();
+  const abort = new AbortController();
   res.on('close', () => abort.abort()); // tab closed
   const started = Date.now();
-  const id = `${stamp(started)}-${kind}`;
-  const video = `${stamp(started)}-${label}.mp4`;
-  const entry = { id, kind, started, project, ...(userId && { userId }) };
-  currentRun = { project };
-  stage.setAudience(project); // the live view is shown only to members of this project
+  const tag = randomBytes(3).toString('hex'); // runs can now start in the same second
+  const id = `${stamp(started)}-${kind}-${tag}`;
+  const video = `${stamp(started)}-${label}-${tag}.mp4`;
+  const runDir = join(dataDir, 'live', id); // this run's MCP config and output, replay output; removed when the run ends
+  mkdirSync(runDir, { recursive: true });
+  const entry = { id, kind, started, project };
+  const stage = createStage(ports);
+  const run = { stage, project, abort, done: false };
+  active.set(id, run);
   const rec = loadRecording();
   if (rec.device) entry.device = rec.device;
   let stopRecording;
@@ -359,11 +373,15 @@ async function withRun(res, { kind, record, guide, label, project, userId }, bod
   });
   send('run', { id });
   try {
-    await body({ send, signal: abort.signal, entry, rec, mask, addGuideStep, startRecording: () => { if (record && !stopRecording) stopRecording = stage.startRecording(join(recordingsDir, video), rec); } });
+    await body({ send, signal: abort.signal, entry, rec, runDir, stage, mask, addGuideStep, startRecording: () => { if (record && !stopRecording) stopRecording = stage.startRecording(join(recordingsDir, video), rec); } });
   } catch (e) {
     entry.status = abort.signal.aborted ? 'stopped' : 'error';
     if (entry.status === 'stopped') send('stopped', 'Stopped'); else { entry.error = e.message; send('fail', e.message); }
   } finally {
+    // the browser first: whatever throws below (history write, cleanup) must not keep it open forever
+    Object.assign(run, { done: true, doneAt: Date.now() });
+    stage.closeWhenIdle(() => active.delete(id));
+    trimIdle();
     entry.secs = Math.round((Date.now() - started) / 1000);
     if (entry.blocked) {
       entry.status = 'blocked';
@@ -376,28 +394,25 @@ async function withRun(res, { kind, record, guide, label, project, userId }, bod
     }
     stopBoxes?.(); stopIssues();
     if (steps) {
-      const name = `${stamp(started)}-${label}.pdf`;
+      const name = `${stamp(started)}-${label}-${tag}.pdf`;
       try { await buildGuidePdf(entry, steps.finish(), join(guidesDir, name), { ...loadGuide(), logo: logoDataUrl() }); entry.guide = name; send('guide', `/guides/${name}`); }
       catch (e) { send('fail', `PDF guide failed: ${e.message}`); }
     }
     addRun(entry);
+    rmSync(runDir, { recursive: true, force: true });
     send('saved', { id });
-    stage.closeWhenIdle();
     pruneOutputs(rec.keep ?? DEFAULT_RECORDING.keep);
-    releaseTurn();
     res.end();
   }
 }
 
-function aiRun(res, { project, userId, url, task, provider, model, record, guide, session, flow, env, expected }) {
-  return withRun(res, { kind: 'ai', record, guide, label: provider.id, project, userId }, async ({ send, signal, entry, rec, startRecording, addGuideStep }) => {
+function aiRun(res, { project, url, task, provider, model, record, guide, session, flow, env, expected }) {
+  return withRun(res, { kind: 'ai', record, guide, label: provider.id, project, locks: dbLock(project, env) }, async ({ send, signal, entry, rec, runDir, stage, startRecording, addGuideStep }) => {
     Object.assign(entry, { url, task, provider: provider.label, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, steps: [] });
-    writeRunVars(env, project);
     await resetDatabase(project, env, line => send('text', line));
     const startUrl = makeResolver({ vars: env.vars }).fill(url); // {{baseUrl}} in the URL field
     const sessionData = session ? JSON.parse(readFileSync(pickSession(project, session), 'utf8')) : null;
-    clearMcpScratch();
-    await stage.ownBrowser(rec, sessionData);
+    const mcp = mcpFor(runDir, await stage.ownBrowser(rec, sessionData), env, project);
     startRecording();
     const secrets = projectSecrets(project);
     const envVarNames = Object.keys(env.vars);
@@ -415,7 +430,7 @@ function aiRun(res, { project, userId, url, task, provider, model, record, guide
       send(type, data);
     };
     const { text } = await engines[provider.engine]({
-      provider, model: model || provider.model, prompt, system: SYSTEM, mcpConfigPath, mcpServer, cwd: dir,
+      provider, model: model || provider.model, prompt, system: SYSTEM, ...mcp, cwd: dir,
     }, emit, signal);
     const { evidence, script } = splitAnswer(text);
     // with an expectation, both the task and the expectation must hold; the AI's word alone is not enough
@@ -427,11 +442,11 @@ function aiRun(res, { project, userId, url, task, provider, model, record, guide
 }
 
 // Plays test files in the runner's browser, streamed to the stage. Shared by replays and fix verification.
-async function playTests(files, { project, rec, session, storageFile, testDir, testDataDir, vars, envName, dbUrl, repeatEach, dataRows, updateSnapshots }, { send, signal, entry, mask, startRecording, addGuideStep }) {
-  await stage.claimPort(stage.REPLAY_CDP_PORT); // the live view must attach to this run's browser, not another one
+async function playTests(files, { project, rec, session, storageFile, testDir, testDataDir, vars, envName, dbUrl, repeatEach, dataRows, updateSnapshots }, { send, signal, entry, mask, startRecording, addGuideStep, runDir, stage }) {
+  const cdpPort = await stage.reservePort(); // this run's runner browser; the live view attaches to it
   const runnerDone = new AbortController(); // stop waiting for the browser if the runner ends first (e.g. a compile error)
   const watchSignal = AbortSignal.any([signal, runnerDone.signal]);
-  const watching = stage.watchReplayBrowser(rec, watchSignal).then(() => { if (!watchSignal.aborted) startRecording(); });
+  const watching = stage.watchReplayBrowser(cdpPort, rec, watchSignal).then(() => { if (!watchSignal.aborted) startRecording(); });
   entry.log ??= []; entry.replaySteps ??= [];
   const onLine = line => { if (entry.log.length < 500) entry.log.push(line); send('log', line); };
   const onStep = raw => {
@@ -440,8 +455,8 @@ async function playTests(files, { project, rec, session, storageFile, testDir, t
     if (step && entry.replaySteps.length < 500) { entry.replaySteps.push(step); send('step', step); }
   };
   let result;
-  try { result = await runTests(files, { ...rec, sessionFile: storageFile ?? pickSession(project, session), secrets: projectSecrets(project), apiKeyEnvs: loadProviders().map(pr => pr.apiKeyEnv).filter(Boolean), testDir, testDataDir, dbUrl, vars, envName, repeatEach, dataRows, updateSnapshots }, { onLine, onStep }, signal); }
-  finally { runnerDone.abort(); await watching; }
+  try { result = await runTests(files, { ...rec, cdpPort, outputDir: join(runDir, `replay-${Date.now()}`), sessionFile: storageFile ?? pickSession(project, session), secrets: projectSecrets(project), apiKeyEnvs: loadProviders().map(pr => pr.apiKeyEnv).filter(Boolean), testDir, testDataDir, dbUrl, vars, envName, repeatEach, dataRows, updateSnapshots }, { onLine, onStep }, signal); }
+  finally { runnerDone.abort(); await watching; stage.releasePort(cdpPort); } // a workflow may replay many tests in one run
   keepErrorContext(result.tests, entry.log);
   keepVisualDiffs(result.tests, entry.id);
   return result;
@@ -477,8 +492,8 @@ function keepErrorContext(tests, log) {
   }
 }
 
-function replayRun(res, { project, userId, names, record, guide, session, env, times = 1, schedule, updateSnapshots = false }) {
-  return withRun(res, { kind: 'replay', record, guide, label: names.length > 1 ? 'suite' : names[0], project, userId }, async ctx => {
+function replayRun(res, { project, names, record, guide, session, env, times = 1, schedule, updateSnapshots = false }) {
+  return withRun(res, { kind: 'replay', record, guide, label: names.length > 1 ? 'suite' : names[0], project, locks: dbLock(project, env) }, async ctx => {
     const { send, entry, rec } = ctx;
     // a single test with a data set runs once per row; in a suite, data-driven tests use their first row
     const rows = names.length === 1 ? parseCsv(readData(project, names[0])).length : 0;
@@ -494,18 +509,16 @@ function replayRun(res, { project, userId, names, record, guide, session, env, t
 
 // "Fix with AI": the AI reproduces a failing saved test in the browser, writes a corrected version, and the
 // corrected version is then replayed without AI as proof. Nothing is saved until the user clicks "Save fix".
-function fixRun(res, { run, userId, name, provider, model, env }) {
+function fixRun(res, { run, name, provider, model, env }) {
   const { project } = run;
-  return withRun(res, { kind: 'fix', record: false, guide: false, label: `fix-${name}`, project, userId }, async ctx => {
-    const { send, signal, entry, rec } = ctx;
+  return withRun(res, { kind: 'fix', record: false, guide: false, label: `fix-${name}`, project, locks: dbLock(project, env) }, async ctx => {
+    const { send, signal, entry, rec, runDir, stage } = ctx;
     const failed = run.tests.find(t => t.file.replace(/\.spec\.ts$/, '') === name);
     const original = readTest(project, name);
     Object.assign(entry, { task: `Fix test: ${name}`, testNames: [name], fixOf: run.id, provider: provider.label, model: model || provider.model || '', session: run.session, env: env.name || undefined, original, steps: [] });
-    writeRunVars(env, project);
     await resetDatabase(project, env, line => send('text', line));
     const sessionData = run.session ? JSON.parse(readFileSync(pickSession(project, run.session), 'utf8')) : null;
-    clearMcpScratch();
-    await stage.ownBrowser(rec, sessionData);
+    const mcp = mcpFor(runDir, await stage.ownBrowser(rec, sessionData), env, project);
 
     const firstUrl = makeResolver({ vars: env.vars }).fill(withPlaceholders(original).match(/goto\(\s*(['"`])(.*?)\1/)?.[2] ?? '/');
     const url = /^https?:/.test(firstUrl) ? firstUrl : new URL(firstUrl, env.vars.baseUrl || process.env.BASE_URL || 'http://localhost').href;
@@ -524,7 +537,7 @@ function fixRun(res, { run, userId, name, provider, model, env }) {
 4. Otherwise answer RESULT: SUCCESS, explain in 1-3 bullets what was wrong and what you changed, and give the complete corrected test file in one \`\`\`ts block. Keep the test title, the steps that already work, and secrets as '{{NAME}}'. Prefer getByRole/getByLabel locators and expect() waits over fixed timeouts.`,
     ].filter(Boolean).join('\n\n');
     const emit = (type, data) => { if (type === 'tool' && entry.steps.length < 300) entry.steps.push(data); send(type, data); };
-    const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: SYSTEM, mcpConfigPath, mcpServer, cwd: dir }, emit, signal);
+    const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: SYSTEM, ...mcp, cwd: dir }, emit, signal);
     const { evidence, script } = splitAnswer(text);
     Object.assign(entry, { text, evidence });
     if (!/RESULT:\s*SUCCESS/.test(text) || !script || !/\btest\(/.test(script)) {
@@ -534,12 +547,13 @@ function fixRun(res, { run, userId, name, provider, model, env }) {
     }
     entry.script = prepareScript(script, { urlVars: urlVars() });
     send('log', 'Verifying the corrected test with plain Playwright (no AI)…');
-    mkdirSync(fixesDir, { recursive: true });
-    const file = join(fixesDir, `${name}.spec.ts`);
+    const fixDir = join(runDir, 'fix'); // per run: two fixes of the same test name must not overwrite each other
+    mkdirSync(fixDir, { recursive: true });
+    const file = join(fixDir, `${name}.spec.ts`);
     // same script, but its helper import must point back to tests/support from here
-    const support = relative(fixesDir, join(testsDir, 'support', 'vars')).split('\\').join('/');
+    const support = relative(fixDir, join(testsDir, 'support', 'vars')).split('\\').join('/');
     writeFileSync(file, prepareScript(script, { urlVars: urlVars(), supportImport: support.startsWith('.') ? support : `./${support}` }));
-    const { tests, ok } = await playTests([file], { project, rec, session: run.session, testDir: fixesDir, testDataDir: join(projectDir(project), 'data'), vars: env.vars, envName: env.name, dbUrl: projectDb(project, env.name)?.url }, ctx);
+    const { tests, ok } = await playTests([file], { project, rec, session: run.session, testDir: fixDir, testDataDir: join(projectDir(project), 'data'), vars: env.vars, envName: env.name, dbUrl: projectDb(project, env.name)?.url }, ctx);
     Object.assign(entry, { status: ok ? 'pass' : 'fail', tests });
     send('done', { ok, tests, text, secs: Math.round((Date.now() - entry.started) / 1000) });
   });
@@ -552,21 +566,19 @@ const noProduction = url => {
 /* ---------- workflows ---------- */
 // One browser for the whole workflow, so a login or an open page carries over. A Saved Test block runs in the
 // test runner's browser with the same login; the next AI block reopens ours with the login it had last.
-function workflowRun(res, { project, userId, wf, params, env, session, record, guide, provider, model }) {
-  return withRun(res, { kind: 'workflow', record, guide, label: `wf-${wf.id}`, project, userId }, async ctx => {
-    const { send, signal, entry, rec, mask, startRecording, addGuideStep } = ctx;
+function workflowRun(res, { project, wf, params, env, session, record, guide, provider, model }) {
+  return withRun(res, { kind: 'workflow', record, guide, label: `wf-${wf.id}`, project, locks: dbLock(project, env) }, async ctx => {
+    const { send, signal, entry, rec, runDir, stage, mask, startRecording, addGuideStep } = ctx;
     Object.assign(entry, { task: `Workflow: ${wf.name}`, workflow: wf.id, params, env: env.name || undefined, session: session || undefined, provider: provider.label, model: model || provider.model || '', blocks: [], steps: [] });
-    writeRunVars(env, project);
     await resetDatabase(project, env, line => send('text', line));
     const secrets = projectSecrets(project);
     // HTTP blocks fill {{...}} here, with this project's secrets only
     const resolver = makeResolver({ vars: env.vars, secrets: Object.fromEntries(secrets.map(n => [n, process.env[`SECRET_${n}`]])), envName: env.name });
     let storage = session ? JSON.parse(readFileSync(pickSession(project, session), 'utf8')) : null;
-    let browserOpen = false;
-    const openBrowser = async () => {
+    let browserOpen = false, mcp = null;
+    const openBrowser = async () => { // a test block closes our browser; a later AI block reopens it on a new port
       if (browserOpen) return;
-      clearMcpScratch();
-      await stage.ownBrowser(rec, storage);
+      mcp = mcpFor(runDir, await stage.ownBrowser(rec, storage), env, project);
       browserOpen = true;
       startRecording();
     };
@@ -587,9 +599,6 @@ function workflowRun(res, { project, userId, wf, params, env, session, record, g
       const fill = str => resolver.fill(fillRefs(str, wctx));
       const url = fill(b.url);
       noProduction(url);
-      // on a shared server a request may only go to this app's own addresses, not to the server's network
-      if (SERVER_MODE && !loadEnvironments().filter(e => !e.production).some(e => Object.values(e.vars).some(v => /^https?:\/\//.test(v) && guard.hostOf(v) === guard.hostOf(url))))
-        throw new Error(`${guard.hostOf(url)} is not an address of any environment: on a shared server, requests only go to those`);
       const r = await fetch(url, {
         method: b.method, redirect: 'manual', signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
         headers: Object.fromEntries(Object.entries(b.headers).map(([k, v]) => [k, fill(v)])),
@@ -622,7 +631,7 @@ function workflowRun(res, { project, userId, wf, params, env, session, record, g
           result = { ok, output: { count: items.length }, evidence: ok ? `Ran ${items.length} time(s)` : 'Stopped: a block inside failed' };
         } else if (b.type === 'test') {
           if (browserOpen) storage = await stage.saveSession(); // hand our login to the test runner's browser
-          const file = join(dataDir, `wf-storage-${entry.id}.json`);
+          const file = join(runDir, 'wf-storage.json');
           writeFileSync(file, JSON.stringify(storage ?? { cookies: [], origins: [] }));
           browserOpen = false; // the runner's browser takes the stage; ours is closed
           try {
@@ -641,7 +650,7 @@ function workflowRun(res, { project, userId, wf, params, env, session, record, g
             if (type === 'tool') { if (entry.steps.length < 500) entry.steps.push({ ...data, block: index }); addGuideStep(aiStep(data)); }
             send(type, data);
           };
-          const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: WF_SYSTEM, mcpConfigPath, mcpServer, cwd: dir }, emit, signal);
+          const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: WF_SYSTEM, ...mcp, cwd: dir }, emit, signal);
           result = readAnswer(b, text);
         }
       } catch (e) {
@@ -691,7 +700,6 @@ async function runSchedule(sched) {
     const env = pickEnv(sched.env);
     const names = sched.tests.filter(n => testExists(sched.project, n));
     if (!names.length) throw new Error('none of its tests exist any more');
-    await takeTurn(res);
     await replayRun(res, { project: sched.project, names, record: sched.record, guide: sched.guide, session: sched.session || '', env, times: sched.repeat ?? 1, schedule: sched.name });
     const run = savedId && getRun(savedId);
     // a failing notification (e.g. wrong token) is not a failed run: log it, keep the run's own result
@@ -711,42 +719,28 @@ setInterval(() => {
   }
 }, 30_000).unref();
 
-/* ---------- accounts and access ---------- */
-// Local mode (default): http://127.0.0.1 on this computer. Server mode (APP_MODE=server): shared by a team
-// behind an HTTPS reverse proxy; HOST sets the listen address, APP_HOSTS the host names users open.
-const SERVER_MODE = process.env.APP_MODE === 'server';
-const HOST = process.env.HOST ?? '127.0.0.1';
-const APP_HOSTS = (process.env.APP_HOSTS ?? '').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
-// First start: whoever creates the first account becomes admin. Locally that is anyone on this computer;
-// on a server they also need the code printed in the server log.
-let setupCode = userCount() ? null : randomBytes(4).toString('hex');
-const isLoopback = req => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
-const sessionToken = req => (req.headers.cookie ?? '').match(/(?:^|;\s*)abr_session=([a-f0-9]{64})/)?.[1];
-const sessionCookie = (token, maxAge) => `abr_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${SERVER_MODE ? '; Secure' : ''}`;
+/* ---------- access ---------- */
+// One person per install: no accounts. The origin check below is what keeps other websites out.
 const denied = (msg, status = 403) => Object.assign(new Error(msg), { status });
-function need(user, project, role) {
-  if (!can(user, project, role)) throw denied(roleIn(user, project) ? `This needs the ${role} role in this project` : 'You are not a member of this project');
-  projectDir(project);
-}
-const needAdmin = user => { if (!user.admin) throw denied('Only an admin can do this'); };
-// a run (and its video, PDF, screenshots) may be seen by members of its project
-const needRun = (user, run, role = 'viewer') => {
-  if (!run) throw denied('Run not found', 404);
-  if (run.project ? !can(user, run.project, role) : !user.admin) throw denied('You are not a member of this run\'s project');
-};
+const runOr404 = run => { if (!run) throw denied('Run not found', 404); return run; };
+// The page sets a SameSite=Strict cookie; every API call must carry it. Browsers never send it with a request
+// another site starts (form POST, <img>, even in browsers too old for Sec-Fetch-Site), so no site can drive the app.
+// ponytail: a new token per server start; an open tab needs a reload after a restart
+const pageToken = randomBytes(24).toString('hex');
+const fromOurPage = req => (req.headers.cookie ?? '').split(/;\s*/).includes(`abr_page=${pageToken}`);
 
 /* ---------- http ---------- */
 // Only this page may call the API: blocks other sites (CSRF / key theft via baseURL) and DNS rebinding
 const sameOrigin = req => {
   const host = (req.headers.host ?? '').toLowerCase();
-  const known = /^(127\.0\.0\.1|localhost):\d+$/.test(host) || APP_HOSTS.includes(host) || APP_HOSTS.includes(host.replace(/:\d+$/, ''));
+  const known = /^(127\.0\.0\.1|localhost):\d+$/.test(host);
   return known && ['same-origin', 'none', undefined].includes(req.headers['sec-fetch-site']);
 };
 const json = (res, data, code = 200) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
 const fail = (res, e, code = e.status ?? 400) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8' }); res.end(e.message ?? String(e)); };
-const readBody = req => new Promise((resolve, reject) => {
+const readBody = (req, limit = 500_000) => new Promise((resolve, reject) => {
   let body = '';
-  req.on('data', c => { body += c; if (body.length > 500_000) { reject(new Error('Request body too large')); req.destroy(); } });
+  req.on('data', c => { body += c; if (body.length > limit) { reject(new Error('Request body too large')); req.destroy(); } });
   req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch { reject(new Error('Invalid JSON')); } });
 });
 const sse = res => res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
@@ -758,44 +752,19 @@ async function route(req, res) {
   const q = k => u.searchParams.get(k) ?? '';
 
   // the page itself: it shows the login screen when there is no session
-  if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return res.end(readFileSync(join(dir, 'index.html'))); }
+  if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': `abr_page=${pageToken}; HttpOnly; SameSite=Strict; Path=/` }); return res.end(readFileSync(join(dir, 'index.html'))); }
   const STATIC = { '/shared.mjs': 'text/javascript', '/app.js': 'text/javascript', '/studio.js': 'text/javascript', '/app.css': 'text/css' };
   if (STATIC[p]) { res.writeHead(200, { 'content-type': `${STATIC[p]}; charset=utf-8` }); return res.end(readFileSync(join(dir, p.slice(1)))); }
+  if (!fromOurPage(req)) throw denied('Open the app from its own page (reload it after the app restarts)');
 
-  /* ----- sign in ----- */
-  const user = userOf(sessionToken(req));
-  if (p === '/auth/me') return json(res, { user, setup: !userCount(), setupNeedsCode: SERVER_MODE || !isLoopback(req), serverMode: SERVER_MODE });
-  if (p === '/auth/setup' && m === 'POST') {
-    const { name, email, password, code } = await readBody(req);
-    if (userCount()) throw denied('Setup is already done: sign in');
-    if ((SERVER_MODE || !isLoopback(req)) && code !== setupCode) throw denied('Wrong setup code: it is printed in the server log');
-    createUser({ name, email, password, admin: true, mustChange: false });
-    setupCode = null;
-    const { token, maxAge } = login(email, password);
-    res.setHeader('set-cookie', sessionCookie(token, maxAge));
-    return json(res, { ok: true });
-  }
-  if (p === '/auth/login' && m === 'POST') {
-    const { email, password } = await readBody(req);
-    const { token, maxAge } = login(email, password);
-    res.setHeader('set-cookie', sessionCookie(token, maxAge));
-    return json(res, { ok: true });
-  }
-  if (p === '/auth/logout' && m === 'POST') { logout(sessionToken(req)); res.setHeader('set-cookie', sessionCookie('', 0)); return json(res, { ok: true }); }
-  if (!user) throw denied('Sign in first', 401);
-  if (p === '/auth/password' && m === 'POST') {
-    const { current, next } = await readBody(req);
-    changeOwnPassword(user.id, current, next);
-    return json(res, { ok: true });
-  }
-  if (user.mustChange) throw denied('Choose your own password first', 403);
 
   /* ----- live view, files, stop ----- */
-  if (p === '/screen') { sse(res); return stage.addViewer(res, project => Boolean(project) && can(user, project, 'viewer')); }
+  const liveRun = id => { const run = active.get(id); if (!run) throw denied('That run is not running'); return run; };
+  if (p === '/screen') { const run = liveRun(q('run')); sse(res); return run.stage.addViewer(res); }
 
   const recMatch = p.match(/^\/recordings\/([\w-]+\.mp4)$/);
   if (recMatch) {
-    needRun(user, runOfFile('video', recMatch[1]));
+    runOr404(runOfFile('video', recMatch[1]));
     const file = join(recordingsDir, recMatch[1]);
     if (!existsSync(file)) { res.writeHead(404); return res.end(); }
     const size = statSync(file).size;
@@ -808,37 +777,21 @@ async function route(req, res) {
     return createReadStream(file, { start, end }).pipe(res);
   }
   const visMatch = p.match(/^\/visual\/([\w-]+)\/([\w.-]+\.(png|jpg))$/);
-  if (visMatch) { needRun(user, getRun(visMatch[1])); return sendFile(res, join(visualDir, visMatch[1], visMatch[2]), { 'content-type': visMatch[3] === 'jpg' ? 'image/jpeg' : 'image/png' }); }
+  if (visMatch) { runOr404(getRun(visMatch[1])); return sendFile(res, join(visualDir, visMatch[1], visMatch[2]), { 'content-type': visMatch[3] === 'jpg' ? 'image/jpeg' : 'image/png' }); }
   const guideMatch = p.match(/^\/guides\/([\w-]+\.pdf)$/);
   if (guideMatch) {
-    needRun(user, runOfFile('guide', guideMatch[1]));
+    runOr404(runOfFile('guide', guideMatch[1]));
     return sendFile(res, join(guidesDir, guideMatch[1]), { 'content-type': 'application/pdf', 'content-disposition': `inline; filename="guide-${guideMatch[1]}"` });
   }
-  if (p === '/stop' && m === 'POST') {
-    if (!currentRun || !can(user, currentRun.project, 'tester')) throw denied('You can only stop runs of your own projects');
-    currentAbort?.abort(); res.writeHead(204); return res.end();
-  }
-
-  /* ----- users (admin) and the member picker ----- */
-  if (p === '/users' && m === 'GET') { needAdmin(user); return json(res, listUsers()); }
-  if (p === '/users' && m === 'POST') { needAdmin(user); return json(res, { id: createUser(await readBody(req)) }); }
-  const userMatch = p.match(/^\/users\/(\d+)$/);
-  if (userMatch && m === 'PUT') { needAdmin(user); updateUser(Number(userMatch[1]), await readBody(req), user.id); return json(res, { ok: true }); }
-  if (p === '/users/directory') { // to add members: maintainers of any project, and admins
-    if (!user.admin && !Object.values(user.roles).includes('maintainer')) throw denied('Only maintainers can add members');
-    return json(res, listUsers().filter(x => x.active).map(({ id, name, email }) => ({ id, name, email })));
-  }
+  if (p === '/stop' && m === 'POST') { liveRun(q('run')).abort.abort(); res.writeHead(204); return res.end(); }
 
   /* ----- settings: admins change them; everyone gets what the run forms need ----- */
   if (p === '/settings' && m === 'GET') {
-    const providers = loadProviders().filter(pr => !SERVER_MODE || pr.engine !== 'claude-code').map(pr => ({ ...pr, ready: ready(pr) }));
-    const base = { serverMode: SERVER_MODE, engines: Object.keys(engines).filter(e => !SERVER_MODE || e !== 'claude-code'), days: DAYS, activeEnv: defaultEnv(), recording: loadRecording() };
-    if (!user.admin) return json(res, { ...base, providers: providers.map(({ id, label, engine, model, ready: r }) => ({ id, label, engine, model, ready: r })), environments: loadEnvironments().filter(e => !e.production) });
+    const providers = loadProviders().map(pr => ({ ...pr, ready: ready(pr), ...(pr.engine === 'claude-code' && { account: accountOf(pr) }) }));
     // never send key/secret values to the browser, only names and whether a key is set
-    return json(res, { ...base, providers, devices: DEVICES, schedules: loadSettingsFile().schedules ?? [], guide: loadGuide(), guideLangs: GUIDE_LANGS, hasLogo: existsSync(logoFile), notify: loadSettingsFile().notify ?? {}, secrets: secretNames(), secretProjects: secretProjects(), environments: loadEnvironments() });
+    return json(res, { engines: Object.keys(engines), days: DAYS, activeEnv: defaultEnv(), recording: loadRecording(), providers, devices: DEVICES, schedules: loadSettingsFile().schedules ?? [], guide: loadGuide(), guideLangs: GUIDE_LANGS, hasLogo: existsSync(logoFile), notify: loadSettingsFile().notify ?? {}, secrets: secretNames(), secretProjects: secretProjects(), environments: loadEnvironments() });
   }
   if (p === '/settings' && m === 'POST') {
-    needAdmin(user);
     const { providers, recording, secrets, secretProjects: scopes, environments, activeEnv, schedules, notify: notifyCfg, guide } = await readBody(req);
     const guideCfg = validGuide(guide ?? loadGuide());
     const envs = validEnvironments(environments, activeEnv);
@@ -847,7 +800,6 @@ async function route(req, res) {
     if (chat && !/^-?\d+$|^@\w+$/.test(chat)) throw new Error('Telegram chat id is a number (or @channelname)');
     const rec = validRecording(recording ?? {}); // validate everything before writing anything
     const [saved, keyWrites] = validProviders(providers);
-    if (SERVER_MODE && saved.some(pr => pr.engine === 'claude-code')) throw new Error('On a shared server, use an API provider: a personal Claude subscription cannot be shared');
     const secretWrites = validSecrets(secrets);
     const scoped = validSecretProjects(scopes, listProjects().map(pr => pr.id));
     for (const [k, v] of [...keyWrites, ...secretWrites]) saveEnv(k, v);
@@ -857,22 +809,22 @@ async function route(req, res) {
   }
 
   /* ----- projects ----- */
-  if (p === '/projects' && m === 'GET') { // the start screen: the projects this user belongs to
-    const all = listProjects(), ids = visibleProjects(user, all.map(pr => pr.id));
+  if (p === '/projects' && m === 'GET') { // the start screen: every project on this computer
+    const all = listProjects(), ids = all.map(pr => pr.id);
     const runs = listRuns(ids);
-    return json(res, all.filter(pr => ids.includes(pr.id)).map(({ db, ...pr }) => {
-      const own = runs.filter(r => r.project === pr.id), role = roleIn(user, pr.id);
+    return json(res, all.map(({ db, ...pr }) => {
+      const own = runs.filter(r => r.project === pr.id);
       return {
-        ...pr, role, tests: listTests(pr.id).map(t => t.name), runs: own.length,
+        ...pr, tests: listTests(pr.id).map(t => t.name), runs: own.length,
         last: own[0] ? { status: own[0].status, started: own[0].started } : null, recent: own.slice(0, 12).map(r => r.status),
         secrets: projectSecrets(pr.id), sessions: listSessions(pr.id),
-        ...(role === 'maintainer' && { db, dbPassSet: Object.fromEntries(Object.keys(db ?? {}).map(e => [e, Boolean(process.env[dbPassKey(pr.id, e)])])) }),
+        db, dbPassSet: Object.fromEntries(Object.keys(db ?? {}).map(e => [e, Boolean(process.env[dbPassKey(pr.id, e)])])),
       };
     }));
   }
   const projMatch = p.match(/^\/projects\/([a-z0-9-]+)$/);
   if ((p === '/projects' && m === 'POST') || (projMatch && m === 'PUT')) {
-    if (projMatch) need(user, projMatch[1], 'maintainer'); else needAdmin(user);
+    if (projMatch) projectDir(projMatch[1]);
     const { dbPasswords = {}, ...fields } = await readBody(req);
     const db = validDb(fields.db); // before writing anything
     for (const v of Object.values(dbPasswords)) if (/[\r\n]/.test(String(v))) throw new Error('Invalid database password');
@@ -882,18 +834,16 @@ async function route(req, res) {
   }
   if (p === '/db/test' && m === 'POST') { // settings not saved yet: the password typed now, else the saved one
     const { project: pr, env: envName, config, password } = await readBody(req);
-    if (pr) need(user, pr, 'maintainer'); else needAdmin(user);
+    if (pr) projectDir(pr);
     const cfg = validDb({ [envName]: config })[envName];
     const pass = password || (pr ? process.env[dbPassKey(pr, envName)] : '');
     return json(res, { ok: true, server: await testDb(cfg, pass) });
   }
-  if (projMatch && m === 'DELETE') { // its tests, runs, videos, PDFs, members, sessions and database passwords
-    needAdmin(user);
+  if (projMatch && m === 'DELETE') { // its tests, runs, videos, PDFs, sessions and database passwords
     const id = projMatch[1];
     const dbKeys = Object.keys(readProject(id).db ?? {}).map(e => dbPassKey(id, e));
     deleteProject(id);
     for (const k of dbKeys) saveEnv(k, null);
-    dropProjectMembers(id);
     rmSync(join(sessionsDir, id), { recursive: true, force: true });
     for (const r of removeRuns(id)) {
       if (r.video) rmSync(join(recordingsDir, r.video), { force: true });
@@ -902,19 +852,51 @@ async function route(req, res) {
     }
     res.writeHead(204); return res.end();
   }
-  const memMatch = p.match(/^\/projects\/([a-z0-9-]+)\/members$/);
-  if (memMatch) {
-    need(user, memMatch[1], 'maintainer');
-    if (m === 'PUT') { const { userId, role } = await readBody(req); setMember(memMatch[1], Number(userId), role ?? null); }
-    return json(res, listMembers(memMatch[1]));
+  /* ----- share a project as one file ----- */
+  const expMatch = p.match(/^\/projects\/([a-z0-9-]+)\/export$/);
+  if (expMatch && m === 'GET') {
+    const id = expMatch[1];
+    const { id: _, ...meta } = readProject(id);
+    const bundle = packProject(projectDir(id), { id, ...meta }, projectSecrets(id));
+    res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': `attachment; filename="${id}.abr.json"` });
+    return res.end(JSON.stringify(bundle));
+  }
+  if (p === '/projects/import' && m === 'POST') {
+    const { bundle, mode } = await readBody(req, 20_000_000);
+    const { project, secrets, files } = unpackBundle(bundle); // throws before anything is written
+    const envNames = new Set(loadEnvironments().map(e => e.name));
+    const skippedDb = Object.keys(project.db ?? {}).filter(e => !envNames.has(e));
+    const db = validDb(Object.fromEntries(Object.entries(project.db ?? {}).filter(([e]) => envNames.has(e))));
+    const taken = id => listProjects().some(pr => pr.id === id) || existsSync(join(testsDir, id));
+    let id = project.id, name = project.name.trim();
+    // overwrite only a real project: a plain folder under tests/ is not ours to empty
+    if (mode === 'overwrite' && taken(id) && !listProjects().some(pr => pr.id === id)) throw new Error(`tests/${id} is not a project; import it as a new project instead`);
+    if (taken(id) && mode !== 'overwrite') {
+      let n = 2; while (taken(`${project.id}-${n}`)) n++;
+      if (mode !== 'new') return json(res, { conflict: id, suggestion: `${project.id}-${n}` }, 409);
+      id = `${project.id}-${n}`; name = `${project.name} (${n})`;
+    }
+    const dir = join(testsDir, id);
+    if (mode === 'overwrite' && existsSync(dir)) for (const f of readdirSync(dir)) if (f !== 'project.json') rmSync(join(dir, f), { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    const { created } = existsSync(join(dir, 'project.json')) ? JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')) : {};
+    writeFileSync(join(dir, 'project.json'), JSON.stringify({ name, description: project.description ?? '', url: project.url ?? '', env: envNames.has(project.env) ? project.env : '', ...(Object.keys(db).length && { db }), created: created ?? Date.now() }, null, 2) + '\n');
+    for (const f of files) { mkdirSync(join(dir, f.path, '..'), { recursive: true }); writeFileSync(join(dir, f.path), f.data); }
+    // never bind secrets by itself: an imported workflow could send them anywhere. The user ticks them in Settings.
+    const have = new Set(secretNames());
+    return json(res, { id, files: files.length, unboundSecrets: secrets.filter(n => have.has(n)), missingSecrets: secrets.filter(n => !have.has(n)), missingVars: missingVars(files, loadEnvironments()), skippedDb });
   }
   const projSes = p.match(/^\/projects\/([a-z0-9-]+)\/sessions\/([a-z0-9-]+)$/);
-  if (projSes && m === 'DELETE') { need(user, projSes[1], 'maintainer'); unlinkSync(sessionFile(projSes[1], projSes[2])); res.writeHead(204); return res.end(); }
+  if (projSes && m === 'DELETE') { projectDir(projSes[1]); unlinkSync(sessionFile(projSes[1], projSes[2])); res.writeHead(204); return res.end(); }
   if (p === '/sessions' && m === 'POST') { // "Save login session" after an AI run or a recording
-    const { project: pr, name, flowId } = await readBody(req);
-    need(user, pr, 'tester');
+    const { project: pr, name, flowId, run: runId } = await readBody(req);
+    projectDir(pr);
     const file = sessionFile(pr, slug(name));
-    const state = flowId ? JSON.parse(flowStorage(flowId)) : await stage.saveSession();
+    const state = flowId ? JSON.parse(flowStorage(flowId)) : await (() => {
+      const r = liveRun(runId);
+      if (r.project !== pr) throw denied('That run belongs to another project'); // never save one project's login into another
+      return r.stage.saveSession();
+    })();
     mkdirSync(join(file, '..'), { recursive: true });
     writeFileSync(file, JSON.stringify(state));
     return json(res, { name: slug(name), cookies: state.cookies.length });
@@ -924,12 +906,12 @@ async function route(req, res) {
   const project = q('project');
   const testMatch = p.match(/^\/tests\/([a-z0-9-]+)$/);
   const dataMatch = p.match(/^\/tests\/([a-z0-9-]+)\/data$/);
-  if (p === '/tests' || testMatch || dataMatch) need(user, project, m === 'GET' ? 'viewer' : m === 'DELETE' ? 'maintainer' : 'tester');
+  if (p === '/tests' || testMatch || dataMatch) projectDir(project);
   if (p === '/tests' && m === 'GET') return json(res, listTests(project));
   if (p === '/tests' && m === 'POST') {
     const { name, runId, code, overwrite } = await readBody(req);
     let script = code;
-    if (runId) { const run = getRun(runId); needRun(user, run, 'tester'); script = run.script; }
+    if (runId) { const run = getRun(runId); runOr404(run); script = run.script; }
     if (!script) throw new Error('This run has no test script');
     return json(res, { name: saveTest(project, slug(name), script, overwrite, { urlVars: urlVars() }) });
   }
@@ -945,7 +927,7 @@ async function route(req, res) {
 
   /* ----- workflows of one project ----- */
   const wfMatch = p.match(/^\/workflows\/([a-z0-9-]+)$/);
-  if (p === '/workflows' || wfMatch) need(user, project, m === 'GET' ? 'viewer' : m === 'DELETE' ? 'maintainer' : 'tester');
+  if (p === '/workflows' || wfMatch) projectDir(project);
   if (p === '/workflows' && m === 'GET') return json(res, listWorkflows(project));
   if (wfMatch && m === 'GET') return json(res, readWorkflow(project, wfMatch[1]));
   if ((p === '/workflows' && m === 'POST') || (wfMatch && m === 'PUT')) {
@@ -955,21 +937,20 @@ async function route(req, res) {
   if (wfMatch && m === 'DELETE') { deleteWorkflow(project, wfMatch[1]); res.writeHead(204); return res.end(); }
 
   /* ----- history ----- */
-  if (p === '/history') { need(user, project, 'viewer'); return json(res, listRuns(project)); }
+  if (p === '/history') { projectDir(project); return json(res, listRuns(project)); }
   const histMatch = p.match(/^\/history\/([\w-]+)$/);
-  if (histMatch) { const r = getRun(histMatch[1]); needRun(user, r); return json(res, r); }
+  if (histMatch) { const r = getRun(histMatch[1]); runOr404(r); return json(res, r); }
   const repMatch = p.match(/^\/report\/([\w-]+)$/);
   if (repMatch) {
     const r = getRun(repMatch[1]);
-    needRun(user, r);
+    runOr404(r);
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-disposition': `attachment; filename="report-${r.id}.html"` });
     return res.end(buildReport(r, recordingsDir));
   }
 
   /* ----- record flow (a window on this computer's desktop: local mode only) ----- */
   if (p === '/record' && m === 'GET') {
-    if (SERVER_MODE) throw new Error('Record flow opens a window on the server\'s own screen, so it is off on a shared server');
-    need(user, project, 'tester');
+    projectDir(project);
     const url = makeResolver({ vars: pickEnv(q('env')).vars }).fill(q('url')); // {{baseUrl}} allowed
     if (!/^https?:\/\//.test(url)) throw new Error('A URL (http/https) is required');
     noProduction(url); // codegen's browser takes no launch flags: only its start address can be checked
@@ -985,14 +966,12 @@ async function route(req, res) {
   /* ----- admin tools ----- */
   const schedRun = p.match(/^\/schedules\/([a-z0-9-]+)\/run$/);
   if (schedRun && m === 'POST') {
-    needAdmin(user);
     const sched = (loadSettingsFile().schedules ?? []).find(x => x.id === schedRun[1]);
     if (!sched) return fail(res, 'Schedule not found', 404);
     runSchedule(sched);
     return json(res, { queued: true });
   }
   if (p === '/ci/export' && m === 'POST') {
-    needAdmin(user);
     const { env: envName } = await readBody(req);
     const env = pickEnv(envName);
     const secrets = secretNames().filter(n => !['TELEGRAM_TOKEN', 'SLACK_WEBHOOK'].includes(n)); // app-only
@@ -1003,7 +982,6 @@ async function route(req, res) {
     return json(res, { path: '.github/workflows/e2e.yml', secrets, vars: JSON.stringify(env.vars), env: env.name, localAddresses: local });
   }
   if (p === '/branding/logo' && m === 'POST') { // { dataUrl: 'data:image/png;base64,...' } from the file picker
-    needAdmin(user);
     const { dataUrl } = await readBody(req);
     const match = String(dataUrl ?? '').match(/^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)$/);
     if (!match) throw new Error('The logo must be a PNG or JPG image');
@@ -1011,7 +989,7 @@ async function route(req, res) {
     writeFileSync(logoFile, `${match[1]}\n${match[2]}`);
     return json(res, { ok: true });
   }
-  if (p === '/branding/logo' && m === 'DELETE') { needAdmin(user); rmSync(logoFile, { force: true }); res.writeHead(204); return res.end(); }
+  if (p === '/branding/logo' && m === 'DELETE') { rmSync(logoFile, { force: true }); res.writeHead(204); return res.end(); }
   if (p === '/branding/logo' && m === 'GET') {
     const url = logoDataUrl();
     if (!url) { res.writeHead(404); return res.end(); }
@@ -1019,7 +997,6 @@ async function route(req, res) {
     res.writeHead(200, { 'content-type': type }); return res.end(Buffer.from(b64, 'base64'));
   }
   if (p === '/notify/test' && m === 'POST') {
-    needAdmin(user);
     const sent = await notify(loadSettingsFile().notify ?? {}, '🔔 Test message from AI Browser Runner: notifications work.');
     if (!sent.length) throw new Error('Nothing is set up: add the secret TELEGRAM_TOKEN plus a chat id, or the secret SLACK_WEBHOOK');
     return json(res, { sent });
@@ -1027,7 +1004,7 @@ async function route(req, res) {
 
   /* ----- runs ----- */
   const pickProvider = () => {
-    const providers = loadProviders().filter(pr => !SERVER_MODE || pr.engine !== 'claude-code');
+    const providers = loadProviders();
     const provider = providers.find(pr => pr.id === q('provider')) ?? providers[0];
     if (!provider) throw new Error('No AI provider is set up: an admin adds one in Settings');
     if (!ready(provider)) throw new Error(`${provider.apiKeyEnv} is not set`);
@@ -1035,16 +1012,16 @@ async function route(req, res) {
   };
   if (p === '/fix') {
     const run = getRun(q('run')), name = q('test');
-    needRun(user, run, 'tester');
+    runOr404(run);
     if (!run.tests?.some(t => t.status !== 'passed' && t.file.replace(/\.spec\.ts$/, '') === name)) throw new Error('That test did not fail in this run');
     if (!existsSync(testPath(run.project, name))) throw new Error(`Test "${name}" not found`);
     const provider = pickProvider();
     const env = pickEnv(q('env') || run.env);
-    sse(res); await takeTurn(res); // after every check: waits if another run is going
-    return fixRun(res, { run, userId: user.id, name, provider, model: q('model'), env });
+    sse(res); // after every check; withRun waits if all run slots are taken
+    return fixRun(res, { run, name, provider, model: q('model'), env });
   }
   if (p === '/workflow-run') {
-    need(user, project, 'tester');
+    projectDir(project);
     const saved = readWorkflow(project, q('workflow'));
     const wf = { id: saved.id, ...validWorkflow(saved, { testExists: name => testExists(project, name) }) }; // its tests may be gone
     const given = JSON.parse(q('params') || '{}');
@@ -1053,11 +1030,11 @@ async function route(req, res) {
     if (session) pickSession(project, session);
     const env = pickEnv(q('env'));
     const provider = pickProvider();
-    sse(res); await takeTurn(res);
-    return workflowRun(res, { project, userId: user.id, wf, params, env, session, record: q('record') === '1', guide: q('guide') === '1', provider, model: q('model') });
+    sse(res);
+    return workflowRun(res, { project, wf, params, env, session, record: q('record') === '1', guide: q('guide') === '1', provider, model: q('model') });
   }
   if (p === '/run' || p === '/replay') {
-    need(user, project, 'tester'); // every run belongs to a project
+    projectDir(project); // every run belongs to a project
     const session = q('session');
     if (session) pickSession(project, session);
     const record = q('record') === '1', guide = q('guide') === '1';
@@ -1068,16 +1045,16 @@ async function route(req, res) {
       if (!/^https?:\/\//.test(makeResolver({ vars: env.vars }).fill(url)) || !task.trim()) throw new Error('A URL (http/https, or {{baseUrl}}/...) and instructions are required');
       noProduction(makeResolver({ vars: env.vars }).fill(url));
       const flow = q('flow'); if (flow) flowScript(flow); // validates before streaming
-      sse(res); await takeTurn(res);
-      return aiRun(res, { project, userId: user.id, url, task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim() });
+      sse(res);
+      return aiRun(res, { project, url, task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim() });
     }
     const names = q('tests').split(',').filter(Boolean);
     if (!names.length) throw new Error('Select at least one test');
     for (const n of names) if (!existsSync(testPath(project, n))) throw new Error(`Test "${n}" not found`); // also validates names
     const times = Number(q('repeat') || 1);
     if (![1, 3, 5].includes(times)) throw new Error('Repeat must be 1, 3 or 5');
-    sse(res); await takeTurn(res); // only after every check
-    return replayRun(res, { project, userId: user.id, names, record, guide, session, env, times, updateSnapshots: q('update') === '1' });
+    sse(res); // only after every check
+    return replayRun(res, { project, names, record, guide, session, env, times, updateSnapshots: q('update') === '1' });
   }
   res.writeHead(404); res.end();
 }
@@ -1085,7 +1062,6 @@ async function route(req, res) {
 http.createServer((req, res) => {
   if (!sameOrigin(req)) { res.writeHead(403); return res.end('forbidden'); }
   route(req, res).catch(e => { if (!res.headersSent) fail(res, e); else res.end(); });
-}).listen(PORT, HOST, () => {
-  console.log(`AI Browser Runner → http://${HOST}:${PORT}${SERVER_MODE ? ` (server mode; hosts: ${APP_HOSTS.join(', ') || 'none set in APP_HOSTS'})` : ''}`);
-  if (setupCode) console.log(`First start: create the admin account in the browser.${SERVER_MODE ? ` Setup code: ${setupCode}` : ` (from another computer it asks for this code: ${setupCode})`}`);
+}).listen(PORT, '127.0.0.1', () => { // this computer only: nothing else on the network can reach it
+  console.log(`AI Browser Runner → http://127.0.0.1:${PORT}`);
 });

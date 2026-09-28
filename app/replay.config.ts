@@ -10,7 +10,7 @@ const height = Number(process.env.REPLAY_H ?? 800);
 export default defineConfig({
   ...base,
   testDir: process.env.REPLAY_TESTDIR || '../tests', // the app verifies AI fixes from another folder
-  outputDir: './data/replay-results',
+  outputDir: process.env.REPLAY_OUTPUT || './data/replay-results', // one folder per run: Playwright empties it when a run starts
   retries: 0,
   workers: 1, // one browser, so the live view follows the tests in order
   fullyParallel: false,

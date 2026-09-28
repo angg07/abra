@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "node",
-      "args": ["mcp-proxy.mjs", "--cdp-endpoint", "http://127.0.0.1:9333", "--output-dir", "runs"]
-    }
-  }
-}

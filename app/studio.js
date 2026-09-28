@@ -21,7 +21,7 @@ const newBlock = type => ({
   ...(type === 'http' && { method: 'GET', url: '', headers: {}, body: '' }),
 });
 
-export function createStudio({ $, api, esc, project, canDo, onRun, onClose }) {
+export function createStudio({ $, api, esc, project, onRun, onClose }) {
   let wf, id, sel = null, tests = [], dirty = false, drag = null, mode = 'blocks';
   const el = $('studio');
 
@@ -41,8 +41,7 @@ export function createStudio({ $, api, esc, project, canDo, onRun, onClose }) {
     delete wf.id;
     for (const b of allBlocks()) b.key ??= uniqueKey(keyOf(b.label), b);
     $('stName').value = wf.name; $('stErr').textContent = ''; $('stSave').textContent = 'Save';
-    const editable = canDo('tester');
-    $('stSave').hidden = $('stRun').hidden = !editable; $('stName').readOnly = !editable;
+    $('stSave').hidden = $('stRun').hidden = false; $('stName').readOnly = false;
     el.hidden = false; document.body.classList.add('studio-open');
     render();
     if (!id) select([0]);
@@ -87,7 +86,6 @@ export function createStudio({ $, api, esc, project, canDo, onRun, onClose }) {
 
   // "+": choose a block type
   function palette(anchor, path, inLoop) {
-    if (!canDo('tester')) return;
     document.querySelector('.st-pal')?.remove();
     const pal = document.createElement('div');
     pal.className = 'st-pal';
@@ -104,7 +102,7 @@ export function createStudio({ $, api, esc, project, canDo, onRun, onClose }) {
   }
 
   // drag a card onto a gap to move it (a loop cannot go inside a loop)
-  el.addEventListener('dragstart', e => { const c = e.target.closest('.st-card'); if (!c || !canDo('tester')) return; drag = c.dataset.path.split('.').map(Number); e.dataTransfer.effectAllowed = 'move'; e.stopPropagation(); });
+  el.addEventListener('dragstart', e => { const c = e.target.closest('.st-card'); if (!c) return; drag = c.dataset.path.split('.').map(Number); e.dataTransfer.effectAllowed = 'move'; e.stopPropagation(); });
   el.addEventListener('dragover', e => { const g = e.target.closest('.st-gap'); if (g && drag) { e.preventDefault(); g.classList.add('over'); } });
   el.addEventListener('dragleave', e => e.target.closest('.st-gap')?.classList.remove('over'));
   el.addEventListener('drop', e => {
@@ -143,7 +141,6 @@ export function createStudio({ $, api, esc, project, canDo, onRun, onClose }) {
 
   function renderPanel() {
     const p = $('stPanel');
-    const ro = !canDo('tester');
     if (!sel) { // workflow settings
       p.innerHTML = `<h3>Workflow</h3>
         ${field('Description', 'wdesc', wf.description, { area: true, rows: 3, placeholder: 'What this workflow does' })}
@@ -172,7 +169,6 @@ export function createStudio({ $, api, esc, project, canDo, onRun, onClose }) {
         <label class="check"><input type="checkbox" name="cont"${b.continueOnFailure ? ' checked' : ''}> Continue with the next block if this one fails</label>
         <div class="foot"><button type="button" class="btn ghost small" data-act="up">Move up</button><button type="button" class="btn ghost small" data-act="down">Move down</button><button type="button" class="link danger" data-act="del">Delete block</button></div>`;
     }
-    for (const x of p.querySelectorAll('input, select, textarea, button')) x.disabled = ro;
   }
 
   $('stPanel').addEventListener('input', e => {

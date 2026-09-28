@@ -1,9 +1,8 @@
 // MCP proxy in front of Playwright MCP that keeps secrets away from the AI.
 // The AI writes {{NAME}}; we substitute SECRET_NAME from .env (and other {{...}} test values) right before the browser tool runs,
 // and mask the real values back to {{NAME}} in everything the AI reads. Works for any engine.
-// Usage (mcp.json): node mcp-proxy.mjs <@playwright/mcp args...>
+// Usage: started per AI run by the server (runs.mjs mcpServerFor): node mcp-proxy.mjs <@playwright/mcp args...>
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
 import varsCore from './vars-core.cjs';
 const { makeResolver } = varsCore;
 import guard from './guard.cjs';
@@ -18,10 +17,10 @@ const secrets = Object.entries(process.env)
   .filter(([k, v]) => k.startsWith('SECRET_') && v)
   .map(([k, v]) => [k.slice('SECRET_'.length), v]);
 // {{...}} test values (dates, random, environment variables, secrets) are resolved right before a tool runs.
-// The server writes the chosen environment's variables to data/run-vars.json before starting a run.
-// Only the run's project's secrets can be filled in, and only those are masked in what the AI reads.
+// The server starts one proxy per AI run and passes that run's environment values and allowed secret
+// names in RUN_VARS. Only the run's project's secrets can be filled in, and only those are masked.
 let runVars = {}, envName = '', allowed = [];
-try { ({ vars: runVars = {}, env: envName = '', secrets: allowed = [] } = JSON.parse(readFileSync(join(import.meta.dirname, 'data', 'run-vars.json'), 'utf8'))); } catch {}
+try { ({ vars: runVars = {}, env: envName = '', secrets: allowed = [] } = JSON.parse(process.env.RUN_VARS ?? '{}')); } catch {}
 const byName = Object.fromEntries(secrets.filter(([n]) => allowed.includes(n)));
 const { fillDeep } = makeResolver({ vars: runVars, secrets: byName, envName });
 // ponytail: plain substring masking; values shorter than 4 chars are skipped to avoid masking random text

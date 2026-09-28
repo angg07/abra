@@ -1,26 +1,37 @@
 // Two engines, one contract: engine(opts, emit, signal) → { text, turns }
 // emit('text', string) and emit('tool', { name, input }) stream progress to the UI.
 import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { spawnOptions, shellArgs, stopChild } from './proc.mjs';
+import { resolveConfigDir } from './claude-config.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const MAX_TURNS = 80;
 const KEEP_FULL_RESULTS = 3; // older tool outputs (mostly page snapshots) get truncated to save tokens
 
 // Claude Code CLI: uses whatever auth the local `claude` has (subscription login or ANTHROPIC_API_KEY)
-export function claudeCode({ model, prompt, system, mcpConfigPath, cwd }, emit, signal) {
+export function claudeCode({ provider, model, prompt, system, mcpConfigPath, cwd }, emit, signal) {
   return new Promise((resolve, reject) => {
-    const claude = spawn('claude', [
-      '-p', prompt,
-      '--append-system-prompt', system,
+    // prompt on stdin and the system prompt in a file: on Windows `claude` only starts through cmd.exe, which
+    // would mangle free text passed as arguments (quotes, &, |, %VAR%)
+    const systemFile = join(dirname(mcpConfigPath), 'system.txt'); // in the run's folder, removed with it
+    writeFileSync(systemFile, system);
+    const claude = spawn('claude', shellArgs([
+      '-p',
+      '--append-system-prompt-file', systemFile,
       '--mcp-config', mcpConfigPath, '--strict-mcp-config',
       '--tools', '', '--allowedTools', 'mcp__playwright',
       '--setting-sources', '',
       '--output-format', 'stream-json', '--verbose',
       '--no-session-persistence',
       ...(model ? ['--model', model] : []),
-    ], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    signal.addEventListener('abort', () => claude.kill());
+    ]), { cwd, stdio: ['pipe', 'pipe', 'pipe'], ...spawnOptions(),
+      // which login (subscription) to use: the provider's config folder, else Claude Code's default
+      ...(provider?.configDir && { env: { ...process.env, CLAUDE_CONFIG_DIR: resolveConfigDir(provider.configDir) } }) });
+    claude.stdin.end(prompt);
+    signal.addEventListener('abort', () => stopChild(claude));
 
     let buf = '', stderr = '';
     claude.stdout.on('data', chunk => {
@@ -52,7 +63,7 @@ export function claudeCode({ model, prompt, system, mcpConfigPath, cwd }, emit, 
 export async function openaiCompatible({ provider, model, prompt, system, mcpServer, cwd }, emit, signal) {
   const apiKey = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : undefined;
   const mcp = new Client({ name: 'ai-browser-runner', version: '1.0.0' });
-  await mcp.connect(new StdioClientTransport({ ...mcpServer, cwd, stderr: 'ignore' }));
+  await mcp.connect(new StdioClientTransport({ ...mcpServer, env: { ...getDefaultEnvironment(), ...mcpServer.env }, cwd, stderr: 'ignore' })); // env alone would drop PATH/HOME
   signal.addEventListener('abort', () => mcp.close());
   try {
     const { tools } = await mcp.listTools();

@@ -4,25 +4,44 @@ A local web app for end-to-end testing of web applications with Playwright. Desc
 language and an AI drives a real browser, or replay saved Playwright tests without AI. You watch it live,
 and every run can produce a video, a step-by-step PDF guide and an HTML report.
 
-## Setup
+## Install
 
-Requirements: Node.js 22+, `ffmpeg` with libx264 (for videos), and for the default AI engine the
-[Claude Code](https://claude.com/claude-code) CLI logged in.
+AI Browser Runner runs on your own computer (Windows, macOS or Linux). You need:
+
+- **Node.js 22.13 or newer**: Windows `winget install OpenJS.NodeJS.LTS`, macOS `brew install node`, Linux https://nodejs.org or your package manager.
+- **ffmpeg** (for videos; everything else works without it): Windows `winget install ffmpeg`, macOS `brew install ffmpeg`, Linux `sudo apt install ffmpeg`.
+- **An AI engine**: [Claude Code](https://claude.com/claude-code) signed in with your subscription, or an API key added later in Settings → AI.
+
+Then, in the app's folder:
 
 ```bash
 npm install
-npm run setup          # Chromium for Playwright MCP
-npx playwright install chromium
-npm run app            # http://127.0.0.1:4321
+npm run setup   # checks the above and installs the browsers
+npm run app     # http://127.0.0.1:4321
 ```
 
-Create `.env` in the project root (it is git-ignored). The app writes API keys and secrets there from
-**Settings**; you can also add them by hand:
+The app writes API keys and secrets to `.env` in the app's folder (git-ignored) from **Settings**; you can also
+add them by hand:
 
 ```bash
-BASE_URL=http://admin-app.test        # used by tests that call page.goto('/')
 SECRET_ADMIN_PASS=...                 # a secret, used as {{ADMIN_PASS}}
 ```
+
+### Share a project
+
+In a project, **Edit → Export project** saves `<project>.abr.json`. On another computer, **Projects → Import**
+reads it. Secrets, database passwords, login sessions and run history are never in the file: after importing,
+the app lists the secrets and environment values to add. Test files are code that runs on your computer:
+import only files from people you trust.
+
+### Checking a Windows install
+
+The app is developed on Linux. On Windows, check once:
+
+1. `npm run setup` shows ✅ for Node and both Chromium builds.
+2. Import a project file and replay one of its tests: it passes and the live view shows the browser.
+3. Start a long replay and press Stop: it stops, and Task Manager shows no Chromium left from it.
+4. With Claude Code installed, start an AI run: it starts (no `spawn claude ENOENT`).
 
 ## Using it
 
@@ -84,30 +103,18 @@ tries is stopped and shown as **Blocked**. A production environment cannot be pi
 cannot appear in another environment. Exact host names only: `staging.example.com` stays allowed. Record flow
 (codegen) only checks its start address. See `app/guard.cjs`.
 
-### Accounts, roles and projects
+### Projects, secrets and parallel runs
 
-Everyone signs in. On the first start the browser asks for the first account, which becomes **admin**
-(from another computer, or in server mode, it also asks for the setup code printed in the server log).
-Admins add the other accounts under **Settings > Users**; there is no sign-up. A new account chooses its own
-password at first sign-in (10+ characters; 5 wrong passwords lock an email for 10 minutes).
+The app has no accounts: it runs on your computer, for you. **Secrets** are given to projects
+(**Settings > Secrets**): a run can only use its own project's secrets. Saved login sessions also belong to one
+project.
 
-| Role | Can |
-|---|---|
-| **Admin** (global) | everything: users, settings, providers, secrets, environments, schedules, every project |
-| **Maintainer** (per project) | edit the project and its database, add/remove members, delete tests and login sessions |
-| **Tester** (per project) | run the AI and saved tests, Fix with AI, save and edit tests, save login sessions |
-| **Viewer** (per project) | see the project's tests, history, videos, PDF guides and reports |
+**Parallel runs**: up to `MAX_RUNS` runs (AI, replays, fixes, workflows) go at once, each in its own browser
+(default `MAX_RUNS=2`; each browser needs a few hundred MB of memory). More runs wait in line. Runs that reset
+the same test database always take turns. Browser debugging ports come from 9400–9499.
 
-Members are added under **Projects > Edit > Members**. Users only see the projects they belong to, and the
-live view only shows runs of those projects. **Secrets** are given to projects (**Settings > Secrets**): a run
-can only use its own project's secrets, so a tester of one project cannot type another project's password
-anywhere. Saved login sessions also belong to one project.
-
-Locked out (e.g. the only admin forgot the password)? On the server: `npm run reset-password -- someone@example.com`
-prints a new first password for that account.
-
-The app's own data (accounts, members, run history) is one SQLite file, `app/data/app.db` (Node's built-in
-`node:sqlite`); back it up by copying it. An old `app/data/history.json` is imported once on start.
+The app's own data (run history) is one SQLite file, `app/data/app.db` (Node's built-in `node:sqlite`); back it
+up by copying it. An old `app/data/history.json` is imported once on start.
 
 ### The application's database (per project)
 
@@ -186,9 +193,8 @@ app/
   library.mjs        projects, saved tests, data sets and workflow files
   workflow.mjs       workflow blocks: validation, {{blocks.x}} references, AI prompts, reading answers
   studio.js          Workflow Studio (the editor in the browser)
-  store.mjs          the app database (app/data/app.db): accounts, members, runs
-  auth.mjs           sign-in, passwords, roles and permissions
-  history.mjs        run history (runs table)
+  store.mjs          the app database (app/data/app.db): run history
+    history.mjs        run history (runs table)
   scheduler.mjs      scheduled suites; notify.mjs sends Telegram/Slack messages
   vars-core.cjs      {{...}} test values, shared by the proxy and tests
   guard.cjs          production block list (browser flags, checks)
@@ -201,27 +207,12 @@ Local only, git-ignored: `tests/<project>/` (your projects hold app addresses an
 keep them in your own private repo or remove `tests/*` from `.gitignore` in a private fork), `.env`, `app/data/` (`app.db` with accounts and history, login sessions with cookies), `app/recordings/`,
 `app/guides/`. Only the newest videos and PDF guides are kept (**Settings > Recording**, default 50).
 
-## Shared server (server mode)
-
-```bash
-APP_MODE=server HOST=127.0.0.1 PORT=4321 APP_HOSTS=runner.example.com npm run app
-```
-
-- Put it behind an HTTPS reverse proxy (Nginx, Caddy) that forwards `runner.example.com` to the port; the session
-  cookie is `Secure`, so sign-in only works over HTTPS. `APP_HOSTS` lists the host names users open; any other
-  Host header is refused.
-- Use an **API provider** (Anthropic or OpenAI-compatible). The "Claude Code (subscription)" provider is off in
-  server mode: a personal Claude subscription must not be shared by a team.
-- **Record flow** is off: it opens a window on the server's own screen.
-- **Isolation limit.** Saved tests are code that runs on the server. The test runner only gets its project's
-  secrets (no other secrets, database passwords or API keys, and no `.env`), but a deliberately written test
-  could still read files the app can read. For untrusted testers, run the app as its own OS user and the test
-  runner in a container; until then, give the Tester role only to people you trust with the server.
-
 ## Security notes
 
-- Locally the server listens on `127.0.0.1` only; it rejects requests from other sites (CSRF) and unknown
-  host names (DNS rebinding). Runs take turns: one started while another is going waits in line.
+- The server listens on `127.0.0.1` only, and there is no sign-in: it rejects requests from other sites (CSRF)
+  and unknown host names (DNS rebinding), which is what keeps other websites in your browser away from it.
+- Imported projects (`.abr.json`) are checked (only test, data, workflow and screenshot files, nothing outside
+  the project folder), but their tests are still code that runs on your computer.
 - Secrets are masked by value in everything the AI reads. It is best-effort: an AI that deliberately
   evaluates a script to spell out a field's value could still see it. Use test accounts, not production
   credentials.
@@ -232,7 +223,8 @@ APP_MODE=server HOST=127.0.0.1 PORT=4321 APP_HOSTS=runner.example.com npm run ap
 | Command | |
 |---|---|
 | `npm run app` | start the app |
-| `npm run test:app` | unit tests for the app (no browser) |
+| `npm run setup` | check Node, ffmpeg and Claude Code; install the browsers |
+| `npm run test:app` | the app's own unit and integration tests (about 20 s, headless) |
 | `npm test` | run all saved tests from the CLI (headed) |
 | `npm run ui` | Playwright UI mode |
 | `npm run codegen` | Playwright codegen |
