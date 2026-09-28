@@ -1,0 +1,30 @@
+{
+  "name": "playwright-headed-e2e",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test",
+    "codegen": "playwright codegen",
+    "report": "playwright show-report",
+    "ui": "playwright test --ui",
+    "app": "node app/server.mjs",
+    "setup": "node node_modules/@playwright/mcp/node_modules/playwright/cli.js install chromium",
+    "test:app": "node --test app/test/*.test.mjs",
+    "reset-password": "node app/reset-password.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/mcp": "^0.0.80",
+    "@playwright/test": "^1.63.0",
+    "axe-core": "^4.13.0",
+    "mysql2": "^3.24.4",
+    "pg": "^8.23.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1"
+  }
+}

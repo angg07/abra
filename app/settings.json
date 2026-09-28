@@ -1,0 +1,37 @@
+{
+  "recording": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "highlight": true,
+    "keep": 50,
+    "a11y": false
+  },
+  "environments": [
+    {
+      "name": "local",
+      "vars": {
+        "appUrl": "http://myapp.test",
+        "appUser": "admin@myapp.test"
+      }
+    },
+    {
+      "name": "e2e",
+      "vars": {
+        "appUrl": "http://myapp.e2e.localhost",
+        "appUser": "admin@myapp.test"
+      }
+    }
+  ],
+  "activeEnv": "e2e",
+  "schedules": [],
+  "notify": {
+    "telegramChatId": ""
+  },
+  "guide": {
+    "lang": "en",
+    "company": "",
+    "accent": "#2b59c3"
+  },
+  "secretProjects": {}
+}

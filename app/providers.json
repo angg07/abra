@@ -1,0 +1,48 @@
+[
+  {
+    "id": "claude-code",
+    "label": "Claude Code (subscription)",
+    "engine": "claude-code",
+    "model": "",
+    "apiKeyEnv": "CLAUDE_CODE_API_KEY"
+  },
+  {
+    "id": "anthropic",
+    "label": "Anthropic API",
+    "engine": "openai-compatible",
+    "model": "claude-sonnet-5",
+    "baseURL": "https://api.anthropic.com/v1",
+    "apiKeyEnv": "ANTHROPIC_API_KEY"
+  },
+  {
+    "id": "openai",
+    "label": "OpenAI API",
+    "engine": "openai-compatible",
+    "model": "gpt-5",
+    "baseURL": "https://api.openai.com/v1",
+    "apiKeyEnv": "OPENAI_API_KEY"
+  },
+  {
+    "id": "gemini",
+    "label": "Google Gemini API",
+    "engine": "openai-compatible",
+    "model": "gemini-2.5-flash",
+    "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "apiKeyEnv": "GEMINI_API_KEY"
+  },
+  {
+    "id": "openrouter",
+    "label": "OpenRouter",
+    "engine": "openai-compatible",
+    "model": "anthropic/claude-sonnet-5",
+    "baseURL": "https://openrouter.ai/api/v1",
+    "apiKeyEnv": "OPENROUTER_API_KEY"
+  },
+  {
+    "id": "ollama",
+    "label": "Ollama (lokal)",
+    "engine": "openai-compatible",
+    "model": "llama3.1",
+    "baseURL": "http://localhost:11434/v1"
+  }
+]

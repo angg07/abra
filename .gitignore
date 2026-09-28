@@ -1,0 +1,16 @@
+node_modules/
+test-results/
+playwright-report/
+.env
+.env.*
+app/runs/
+app/recordings/
+# screenshots the AI agent saves during runs
+app/*.png
+# run history, saved login sessions (contain cookies), replay results
+app/data/
+app/.playwright-mcp/
+app/guides/
+# your projects' tests stay local (they hold app addresses and data); only the shared helpers are part of the repo
+tests/*
+!tests/support/

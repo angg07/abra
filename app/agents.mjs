@@ -1,0 +1,97 @@
+// Two engines, one contract: engine(opts, emit, signal) → { text, turns }
+// emit('text', string) and emit('tool', { name, input }) stream progress to the UI.
+import { spawn } from 'node:child_process';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+const MAX_TURNS = 80;
+const KEEP_FULL_RESULTS = 3; // older tool outputs (mostly page snapshots) get truncated to save tokens
+
+// Claude Code CLI: uses whatever auth the local `claude` has (subscription login or ANTHROPIC_API_KEY)
+export function claudeCode({ model, prompt, system, mcpConfigPath, cwd }, emit, signal) {
+  return new Promise((resolve, reject) => {
+    const claude = spawn('claude', [
+      '-p', prompt,
+      '--append-system-prompt', system,
+      '--mcp-config', mcpConfigPath, '--strict-mcp-config',
+      '--tools', '', '--allowedTools', 'mcp__playwright',
+      '--setting-sources', '',
+      '--output-format', 'stream-json', '--verbose',
+      '--no-session-persistence',
+      ...(model ? ['--model', model] : []),
+    ], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    signal.addEventListener('abort', () => claude.kill());
+
+    let buf = '', stderr = '';
+    claude.stdout.on('data', chunk => {
+      buf += chunk;
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.type === 'assistant') {
+          for (const c of msg.message.content) {
+            if (c.type === 'text') emit('text', c.text);
+            if (c.type === 'tool_use') emit('tool', { name: c.name.replace('mcp__playwright__', ''), input: c.input });
+          }
+        } else if (msg.type === 'result') {
+          if (msg.is_error) reject(new Error(msg.result || 'claude reported an error'));
+          else resolve({ text: msg.result ?? '', turns: msg.num_turns });
+        }
+      }
+    });
+    claude.stderr.on('data', d => { stderr += d; });
+    claude.on('error', e => reject(new Error(`Cannot start claude: ${e.message}`)));
+    claude.on('close', code => reject(new Error(`claude exited (${code}) without a result. ${stderr.slice(-500)}`)));
+  });
+}
+
+// Any OpenAI-compatible /chat/completions API: OpenAI, Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Ollama, LM Studio…
+// ponytail: plain fetch + tool-calling loop, no provider SDKs
+export async function openaiCompatible({ provider, model, prompt, system, mcpServer, cwd }, emit, signal) {
+  const apiKey = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : undefined;
+  const mcp = new Client({ name: 'ai-browser-runner', version: '1.0.0' });
+  await mcp.connect(new StdioClientTransport({ ...mcpServer, cwd, stderr: 'ignore' }));
+  signal.addEventListener('abort', () => mcp.close());
+  try {
+    const { tools } = await mcp.listTools();
+    const fnTools = tools.map(({ name, description, inputSchema: { $schema, ...parameters } }) =>
+      ({ type: 'function', function: { name, description, parameters } }));
+    const messages = [{ role: 'system', content: system }, { role: 'user', content: prompt }];
+
+    for (let turn = 1; turn <= MAX_TURNS; turn++) {
+      const toolMsgs = messages.filter(m => m.role === 'tool');
+      for (const m of toolMsgs.slice(0, -KEEP_FULL_RESULTS))
+        if (m.content.length > 1500) m.content = m.content.slice(0, 1500) + '\n…[older output truncated]';
+
+      const r = await fetch(`${provider.baseURL.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(apiKey && { authorization: `Bearer ${apiKey}` }) },
+        body: JSON.stringify({ model, messages, tools: fnTools }),
+        signal,
+      });
+      if (!r.ok) throw new Error(`${provider.label} HTTP ${r.status}: ${(await r.text()).slice(0, 800)}`);
+      const msg = (await r.json()).choices?.[0]?.message;
+      if (!msg) throw new Error(`${provider.label}: empty response`);
+      messages.push(msg);
+      if (msg.content) emit('text', msg.content);
+      if (!msg.tool_calls?.length) return { text: msg.content ?? '', turns: turn };
+
+      for (const call of msg.tool_calls) {
+        let args = {};
+        try { args = JSON.parse(call.function.arguments || '{}'); } catch {}
+        emit('tool', { name: call.function.name, input: args });
+        const out = await mcp.callTool({ name: call.function.name, arguments: args })
+          .catch(e => ({ content: [{ type: 'text', text: `Error: ${e.message}` }] }));
+        const text = out.content.map(c => c.type === 'text' ? c.text : `[${c.type} omitted]`).join('\n');
+        messages.push({ role: 'tool', tool_call_id: call.id, content: text });
+      }
+    }
+    throw new Error(`Stopped after ${MAX_TURNS} turns without finishing`);
+  } finally {
+    await mcp.close().catch(() => {});
+  }
+}
+
+export const engines = { 'claude-code': claudeCode, 'openai-compatible': openaiCompatible };
