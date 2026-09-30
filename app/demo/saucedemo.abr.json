@@ -1,0 +1,21 @@
+{
+  "format": "ai-browser-runner-project",
+  "version": 1,
+  "exported": "2026-09-30T00:00:00.000Z",
+  "project": {
+    "id": "saucedemo",
+    "name": "Demo shop (Swag Labs)",
+    "description": "A public practice shop to try ABRA: replay the saved tests, or ask the AI to buy something.",
+    "url": "https://www.saucedemo.com",
+    "app": "Swag Labs"
+  },
+  "secrets": [],
+  "files": {
+    "login.spec.ts": {
+      "text": "import { test, expect } from '@playwright/test';\n\n// Swag Labs (saucedemo.com) is a public practice shop: its test accounts and password are published on its login page\ntest('log in and see the products', async ({ page }) => {\n  await page.goto('https://www.saucedemo.com/');\n  await page.getByPlaceholder('Username').fill('standard_user');\n  await page.getByPlaceholder('Password').fill('secret_sauce');\n  await page.getByRole('button', { name: 'Login' }).click();\n  await expect(page.getByText('Products', { exact: true })).toBeVisible();\n});\n"
+    },
+    "checkout.spec.ts": {
+      "text": "import { test, expect } from '@playwright/test';\n\ntest('add the backpack to the cart and check out', async ({ page }) => {\n  await page.goto('https://www.saucedemo.com/');\n  await page.getByPlaceholder('Username').fill('standard_user');\n  await page.getByPlaceholder('Password').fill('secret_sauce');\n  await page.getByRole('button', { name: 'Login' }).click();\n\n  await page.locator('[data-test=\"add-to-cart-sauce-labs-backpack\"]').click();\n  await expect(page.locator('[data-test=\"shopping-cart-badge\"]')).toHaveText('1');\n  await page.locator('[data-test=\"shopping-cart-link\"]').click();\n  await expect(page.getByText('Sauce Labs Backpack')).toBeVisible();\n\n  await page.getByRole('button', { name: 'Checkout' }).click();\n  await page.getByPlaceholder('First Name').fill('Budi');\n  await page.getByPlaceholder('Last Name').fill('Santoso');\n  await page.getByPlaceholder('Zip/Postal Code').fill('12345');\n  await page.getByRole('button', { name: 'Continue' }).click();\n  await page.getByRole('button', { name: 'Finish' }).click();\n  await expect(page.getByRole('heading', { name: 'Thank you for your order!' })).toBeVisible();\n});\n"
+    }
+  }
+}

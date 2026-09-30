@@ -14,7 +14,7 @@ export async function startApp({ port, env = {} }) {
   let err = '';
   server.stderr.on('data', d => { err += d; });
   await new Promise((ok, fail) => {
-    server.stdout.on('data', d => String(d).includes('AI Browser Runner') && ok());
+    server.stdout.on('data', d => String(d).includes('ABRA') && ok());
     server.on('exit', c => fail(new Error(`server exited ${c}: ${err.slice(-500)}`)));
   });
   const base = `http://127.0.0.1:${port}`;

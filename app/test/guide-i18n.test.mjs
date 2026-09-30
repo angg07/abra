@@ -28,3 +28,8 @@ test('English stays as is; unknown sentences are not guessed', () => {
   assert.equal(guideLabels('id').status.pass, 'Berhasil');
   assert.equal(guideLabels('xx').kicker, 'Step-by-step guide'); // unknown language falls back to English
 });
+
+test('tap and read steps are translated too', () => {
+  assert.equal(translateStep('Tap the “Menu” button', 'id'), 'Ketuk tombol “Menu”');
+  assert.equal(translateStep('Read total, status', 'id'), 'Baca total, status');
+});

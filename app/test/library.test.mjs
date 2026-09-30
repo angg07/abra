@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareScript, withPlaceholders } from '../library.mjs';
+import { prepareScript, withPlaceholders, listFolders } from '../library.mjs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
+import { join } from 'node:path';
 
 const src = `import { test, expect } from '@playwright/test';
 
@@ -41,4 +44,18 @@ test('an address that only starts like a known one is left alone', () => {
 
 test('a script without the Playwright import gets one', () => {
   assert.match(prepareScript("test('x', async () => {});"), /^import \{ test, expect \} from '@playwright\/test';/);
+});
+
+test('folder picker: subfolders only (hidden ones last) with full paths; home by default; a file is refused', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abr-folders-'));
+  try {
+    for (const d of ['web', '.git', 'api']) mkdirSync(join(dir, d));
+    writeFileSync(join(dir, 'README.md'), 'x');
+    const r = listFolders(dir);
+    assert.deepEqual(r.dirs.map(d => d.name), ['api', 'web', '.git']);
+    assert.equal(r.dirs[0].path, join(dir, 'api'));
+    assert.equal(r.parent, tmpdir());
+    assert.equal(listFolders('').path, homedir());
+    assert.throws(() => listFolders(join(dir, 'README.md')), /Not a folder/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

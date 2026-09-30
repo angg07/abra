@@ -67,7 +67,7 @@ export function createPortPool(from, to, inUseElsewhere) {
 // The MCP server of one AI run: its own browser, output folder and test values. RUN_VARS holds names and
 // environment values only; the proxy reads secret values from .env itself.
 export const mcpServerFor = (port, outputDir, runVars) => ({
-  command: 'node',
+  command: process.execPath, // the Node running the app (the portable build's own), not whatever is on PATH
   args: ['mcp-proxy.mjs', '--cdp-endpoint', `http://127.0.0.1:${port}`, '--output-dir', outputDir],
   env: { RUN_VARS: JSON.stringify(runVars) },
 });

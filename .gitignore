@@ -13,3 +13,8 @@ app/guides/
 # your projects' tests stay local (they hold app addresses and data); only the shared helpers are part of the repo
 tests/*
 !tests/support/
+# portable builds (npm run package)
+dist/
+# desktop app build (desktop/build.mjs)
+desktop/node_modules/
+desktop/payload/

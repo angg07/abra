@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { guideCollector, replayStep, aiStep, secretMasker } from '../guide.mjs';
+import { guideCollector, replayStep, aiStep, secretMasker, runTitle, entersValue, guideDoc, saveGuideDoc, readGuideDoc, cleanGuideDoc, renderGuidePdf } from '../guide.mjs';
 
 test('box frames pair with click steps in order, whichever arrives first', () => {
   const c = guideCollector(() => 'plain');
@@ -17,6 +17,15 @@ test('box frames pair with click steps in order, whichever arrives first', () =>
     ['Check that “Products” is visible', 'plain'],
     ['Click the highlighted icon', 'BOX2'],
   ]);
+});
+
+test('steps keep the video position they happened at; none before the recording starts', () => {
+  let at;
+  const c = guideCollector(() => 'f', () => at);
+  c.add({ mode: 'before', what: 'Open the page' });
+  at = 2.5;
+  c.add({ mode: 'before', what: 'Click Save' });
+  assert.deepEqual(c.finish().map(s => s.at), [undefined, 2.5]);
 });
 
 test('"after" steps take the frame from when the next step starts', () => {
@@ -80,4 +89,59 @@ test('regex names in locators read as plain text', () => {
   assert.equal(what(2), 'Click the “Jane Doe … Employee” button');
   assert.equal(what(3), 'Click the “Claim” link');
   rmSync(dir, { recursive: true });
+});
+
+test('an AI run shows its own title on the video and PDF; without one, the first line of its instructions', () => {
+  assert.equal(runTitle({ kind: 'ai', title: 'Buat klaim reimbursement', task: 'Login dengan {{appUser}}\nbuka Claims' }), 'Buat klaim reimbursement');
+  assert.equal(runTitle({ kind: 'ai', task: 'Login dengan {{appUser}}\nbuka Claims' }), 'Login dengan {{appUser}}');
+});
+
+test('steps that enter a value (the video holds on them); checks and clicks do not', () => {
+  for (const w of ['Fill in the “Email” field', 'Type into “Search”', 'Choose an option in the “City” dropdown', 'Upload the file', 'Check the “Agree” checkbox', 'Uncheck “News”', 'Fill in the form'])
+    assert.equal(entersValue(w), true, w);
+  for (const w of ['Click the “Save” button', 'Check that the page title is correct', 'Open the page', undefined])
+    assert.equal(entersValue(w), false, String(w));
+});
+
+// a tiny valid JPEG (1x1) for screenshots
+const JPEG = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8wABgAQEAX/2gAIAQEAAD8A0s8g/9k=';
+
+test('guide document: steps become editable blocks, names bold, screenshots saved as files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abr-gdoc-'));
+  try {
+    const run = { kind: 'ai', title: 'Buat klaim', url: 'http://shop.test', started: 0, status: 'pass', issues: [] };
+    const draft = guideDoc(run, [{ section: 'Login', level: 1 }, { what: 'Click the “Save” button', frame: JPEG }, { what: 'Fill in the “Email” field', detail: 'a@b.c' }], 'id');
+    assert.equal(draft.title, 'Buat klaim');
+    assert.deepEqual(draft.blocks.map(b => b.type), ['section', 'step', 'step']);
+    assert.equal(draft.blocks[1].text, 'Klik tombol **“Save”**');
+    const saved = saveGuideDoc(draft, dir);
+    assert.equal(saved.blocks[1].frame, '001.jpg');
+    assert.deepEqual(readGuideDoc(dir), JSON.parse(JSON.stringify(saved))); // as stored
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('guide document: an edit keeps only known blocks, text within limits and this guide\'s own screenshots', () => {
+  const saved = { title: 'T', description: '', run: { status: 'pass' }, blocks: [{ type: 'step', text: 'a', frame: '001.jpg' }] };
+  const edited = cleanGuideDoc({ title: ' ', description: 'Untuk admin', blocks: [
+    { type: 'section', text: 'Upload', level: 1, extra: 'dropped' }, { type: 'tip', text: '- dd/mm/yyyy' }, { type: 'alert', text: 'Cek tanggal' }, { type: 'step', text: 'Klik **Simpan**', frame: '001.jpg' },
+  ] }, saved);
+  assert.equal(edited.title, 'T'); // empty title keeps the old one
+  assert.deepEqual(edited.blocks[0], { type: 'section', text: 'Upload', level: 1 });
+  assert.deepEqual(edited.run, saved.run); // not editable
+  assert.throws(() => cleanGuideDoc({ blocks: [{ type: 'step', text: 'x', frame: '../../.env' }] }, saved), /unknown screenshot/);
+  assert.throws(() => cleanGuideDoc({ blocks: [{ type: 'script', text: 'x' }] }, saved), /unknown kind/);
+  assert.throws(() => cleanGuideDoc({ blocks: [{ type: 'tip', text: 'x'.repeat(5001) }] }, saved), /at most/);
+});
+
+test('guide PDF renders notes, warnings, sections and step cards', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abr-gpdf-'));
+  try {
+    const doc = saveGuideDoc({ version: 1, lang: 'id', title: 'Panduan', description: 'Isi **penting**', run: { status: 'pass', url: 'http://shop.test' }, blocks: [
+      { type: 'section', text: 'Upload', level: 1 }, { type: 'step', text: 'Klik **“Simpan”**', frame: JPEG }, { type: 'tip', text: 'Catatan:\n- satu\n- dua' }, { type: 'alert', text: 'Cek tanggal' },
+    ] }, dir);
+    const pdf = join(dir, 'g.pdf');
+    await renderGuidePdf(doc, dir, pdf, { lang: 'id' });
+    const bytes = readFileSync(pdf);
+    assert.equal(bytes.subarray(0, 4).toString(), '%PDF');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

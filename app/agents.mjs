@@ -1,7 +1,7 @@
 // Two engines, one contract: engine(opts, emit, signal) → { text, turns }
 // emit('text', string) and emit('tool', { name, input }) stream progress to the UI.
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { spawnOptions, shellArgs, stopChild } from './proc.mjs';
 import { resolveConfigDir } from './claude-config.mjs';
@@ -11,18 +11,32 @@ import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotoc
 const MAX_TURNS = 80;
 const KEEP_FULL_RESULTS = 3; // older tool outputs (mostly page snapshots) get truncated to save tokens
 
+// The project's source code (optional, Claude Code only): read-only, and files that usually hold secrets stay
+// closed (the deny rules cover Grep and Glob too)
+const CODE_TOOLS = 'Read,Grep,Glob';
+const SECRET_FILES = ['**/.env*', '**/*.pem', '**/*.key', '**/*.p12', '**/*.pfx', '**/id_rsa*', '**/id_ed25519*', '**/.npmrc', '**/auth.json', '**/.git/**'];
+export const codebaseNote = folders => `\n\nThe application's source code is in ${folders.join(', ')} (read-only: Read, Grep, Glob; separate folders are usually separate parts such as the frontend and the backend). Use it only when it helps the browser task: routes and page addresses, form fields and their validation rules, test ids for locators, or why something fails. Read as little as needed. Decide success or failure only from what the browser shows, never from what the code says should happen.`;
+// the browser always; with codebase folders, reading them too (no Edit, Write or Bash)
+export const toolArgs = folders => (folders?.length
+  ? ['--tools', CODE_TOOLS, '--allowedTools', `mcp__playwright,${CODE_TOOLS}`, ...folders.flatMap(f => ['--add-dir', f]), '--disallowedTools', SECRET_FILES.map(g => `Read(${g})`).join(',')]
+  : ['--tools', '', '--allowedTools', 'mcp__playwright']);
+export const usableCodebase = folder => Boolean(folder) && existsSync(folder) && statSync(folder).isDirectory();
+
 // Claude Code CLI: uses whatever auth the local `claude` has (subscription login or ANTHROPIC_API_KEY)
-export function claudeCode({ provider, model, prompt, system, mcpConfigPath, cwd }, emit, signal) {
+export function claudeCode({ provider, model, prompt, system, mcpConfigPath, cwd, codebase }, emit, signal) {
   return new Promise((resolve, reject) => {
+    const wanted = [].concat(codebase ?? []).filter(Boolean); // older projects hold one path as a string
+    const code = wanted.filter(usableCodebase);
+    for (const f of wanted) if (!code.includes(f)) emit('log', `Codebase folder not found, run without it: ${f}`);
     // prompt on stdin and the system prompt in a file: on Windows `claude` only starts through cmd.exe, which
     // would mangle free text passed as arguments (quotes, &, |, %VAR%)
     const systemFile = join(dirname(mcpConfigPath), 'system.txt'); // in the run's folder, removed with it
-    writeFileSync(systemFile, system);
+    writeFileSync(systemFile, code.length ? system + codebaseNote(code) : system);
     const claude = spawn('claude', shellArgs([
       '-p',
       '--append-system-prompt-file', systemFile,
       '--mcp-config', mcpConfigPath, '--strict-mcp-config',
-      '--tools', '', '--allowedTools', 'mcp__playwright',
+      ...toolArgs(code),
       '--setting-sources', '',
       '--output-format', 'stream-json', '--verbose',
       '--no-session-persistence',
@@ -44,7 +58,9 @@ export function claudeCode({ provider, model, prompt, system, mcpConfigPath, cwd
         if (msg.type === 'assistant') {
           for (const c of msg.message.content) {
             if (c.type === 'text') emit('text', c.text);
-            if (c.type === 'tool_use') emit('tool', { name: c.name.replace('mcp__playwright__', ''), input: c.input });
+            // reading the code is not a browser step: a log line, not a step in the guide
+            if (c.type === 'tool_use' && !c.name.startsWith('mcp__playwright__')) emit('log', `Code: ${c.name} ${c.input.file_path ?? c.input.pattern ?? ''}`.trim());
+            else if (c.type === 'tool_use') emit('tool', { name: c.name.replace('mcp__playwright__', ''), input: c.input });
           }
         } else if (msg.type === 'result') {
           if (msg.is_error) reject(new Error(msg.result || 'claude reported an error'));
@@ -62,7 +78,7 @@ export function claudeCode({ provider, model, prompt, system, mcpConfigPath, cwd
 // ponytail: plain fetch + tool-calling loop, no provider SDKs
 export async function openaiCompatible({ provider, model, prompt, system, mcpServer, cwd }, emit, signal) {
   const apiKey = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : undefined;
-  const mcp = new Client({ name: 'ai-browser-runner', version: '1.0.0' });
+  const mcp = new Client({ name: 'abra', version: '1.0.0' });
   await mcp.connect(new StdioClientTransport({ ...mcpServer, env: { ...getDefaultEnvironment(), ...mcpServer.env }, cwd, stderr: 'ignore' })); // env alone would drop PATH/HOME
   signal.addEventListener('abort', () => mcp.close());
   try {

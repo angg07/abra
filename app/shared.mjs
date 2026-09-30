@@ -4,7 +4,8 @@ export const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': 
 
 // Minimal, escaped markdown for AI text: paragraphs, bullet lists, **bold**, `code`
 export function md(src) {
-  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2">$2</a>'); // addresses become links
   const out = []; let list = null;
   for (const line of String(src).split('\n')) {
     const m = line.match(/^\s*(?:[-*]|\d+\.)\s+(.*)/);

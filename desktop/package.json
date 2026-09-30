@@ -1,0 +1,103 @@
+{
+  "name": "abra",
+  "productName": "ABRA",
+  "version": "1.1.0",
+  "description": "Describe a task, an AI drives a real browser and writes a replayable Playwright test.",
+  "author": "angg07 <20508936+angg07@users.noreply.github.com>",
+  "license": "MIT",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "node build.mjs"
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  },
+  "homepage": "https://github.com/angg07/abra",
+  "build": {
+    "appId": "com.aibrowserrunner.desktop",
+    "productName": "ABRA",
+    "artifactName": "ABRA-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "../dist/desktop",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "loading.html",
+      "build/icon.png"
+    ],
+    "extraResources": [
+      {
+        "from": "payload/bundle",
+        "to": "bundle"
+      },
+      {
+        "from": "payload/runtime-${os}-${arch}",
+        "to": "runtime"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "icon": "build/icon.png",
+      "executableName": "abra"
+    },
+    "deb": {
+      "depends": [
+        "libnss3",
+        "libgtk-3-0 | libgtk-4-1",
+        "libxss1",
+        "libasound2 | libasound2t64"
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "ABRA"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "angg07",
+        "repo": "abra"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}

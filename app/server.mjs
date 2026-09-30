@@ -6,10 +6,11 @@ import { join, relative } from 'node:path';
 import { engines } from './agents.mjs';
 import { createStage, portAnswers } from './stage.mjs';
 import { createPortPool, createLimiter, mcpServerFor, idleToClose } from './runs.mjs';
-import { packProject, unpackBundle, missingVars } from './bundle.mjs';
+import { packProject, unpackBundle, missingVars, packAll, unpackAll, isAll } from './bundle.mjs';
 import { resolveConfigDir, claudeAccount } from './claude-config.mjs';
-import { devices as playwrightDevices } from 'playwright-core';
-import { listTests, readTest, saveTest, deleteTest, testPath, slug, prepareScript, withPlaceholders, readData, saveData, testsDir, projectDir, listProjects, readProject, saveProject, deleteProject, listWorkflows, readWorkflow, saveWorkflow, deleteWorkflow } from './library.mjs';
+import { devices as playwrightDevices, chromium as bundledChromium } from 'playwright-core';
+import { openAppWindow } from './window.mjs';
+import { listTests, readTest, saveTest, deleteTest, testPath, slug, prepareScript, withPlaceholders, readData, saveData, testsDir, projectDir, listProjects, readProject, projectLogoDataUrl, saveProjectLogo, deleteProjectLogo, saveProject, deleteProject, listFolders, listWorkflows, readWorkflow, saveWorkflow, deleteWorkflow } from './library.mjs';
 import varsCore from './vars-core.cjs';
 import guard from './guard.cjs';
 const { makeResolver, parseCsv, secretsFromEnv } = varsCore;
@@ -22,8 +23,11 @@ import { notify, summary } from './notify.mjs';
 import { ciWorkflow } from './ci.mjs';
 import { recordFlow, stopRecording, isRecording, flowScript, flowStorage } from './recorder.mjs';
 import { splitAnswer, flakyOf, expectedVerdict, isAppError } from './shared.mjs';
-import { aiStep, replayStep, guideCollector, buildGuidePdf, secretMasker } from './guide.mjs';
-import { GUIDE_LANGS } from './guide-i18n.mjs';
+import { checkRequirements, installBrowsers, OS_NAMES } from './setup.mjs';
+import { spawn } from 'node:child_process';
+import { aiStep, replayStep, guideCollector, buildGuidePdf, secretMasker, runTitle, entersValue, guideFolder, readGuideDoc, cleanGuideDoc, renderGuidePdf, FRAME_FILE, frameType, guideFrames, addGuideFrame, pruneGuideFrames } from './guide.mjs';
+import { finishVideo } from './video.mjs';
+import { GUIDE_LANGS, guideLabels, translateStep } from './guide-i18n.mjs';
 import { validWorkflow, fillRefs, loopItems, blockPrompt, readAnswer, SYSTEM as WF_SYSTEM } from './workflow.mjs';
 
 const dir = import.meta.dirname;
@@ -43,9 +47,9 @@ const toLog = line => { try { appendFileSync(logPath, `${new Date().toISOString(
 for (const k of ['log', 'warn', 'error']) { const out = console[k]; console[k] = (...a) => { out(...a); toLog(format(...a)); }; }
 process.on('uncaughtExceptionMonitor', (e, origin) => toLog(`CRASH (${origin}): ${e?.stack ?? e}`)); // monitor only: Node still prints it and exits
 // PDF guide branding: language, company, accent color (settings) and a logo (file, as a data: URL)
-const loadGuide = () => ({ lang: 'en', company: '', accent: '#2B59C3', ...(loadSettingsFile().guide ?? {}) });
+const loadGuide = () => ({ lang: 'id', company: '', accent: '#2B59C3', ...(loadSettingsFile().guide ?? {}) });
 const logoDataUrl = () => { try { const [type, b64] = readFileSync(logoFile, 'utf8').split('\n'); return `data:${type};base64,${b64}`; } catch { return ''; } };
-function validGuide({ lang = 'en', company = '', accent = '#2B59C3' } = {}) {
+function validGuide({ lang = 'id', company = '', accent = '#2B59C3' } = {}) {
   if (!GUIDE_LANGS.includes(lang)) throw new Error(`Guide language must be one of ${GUIDE_LANGS.join(', ')}`);
   if (String(company).length > 80) throw new Error('Company name: at most 80 characters');
   if (!/^#[0-9a-f]{6}$/i.test(accent)) throw new Error('Accent color must look like #2B59C3');
@@ -53,6 +57,7 @@ function validGuide({ lang = 'en', company = '', accent = '#2B59C3' } = {}) {
 }
 const settingsPath = join(dir, 'settings.json');
 const PORT = Number(process.env.PORT ?? 4321);
+let browsersInstalling = false; // one Chromium download at a time
 try { process.loadEnvFile(envPath); } catch {} // API keys and secrets live in the project .env
 
 /* ---------- settings: recording, providers, secrets ---------- */
@@ -296,7 +301,9 @@ const pickSession = (project, name) => { if (!name) return null; const f = sessi
 /* ---------- disk: keep the newest videos and PDFs, drop Playwright MCP's scratch files ---------- */
 function pruneOutputs(keep) {
   pruneFolders(visualDir, keep);
-  const gone = new Set([...pruneDir(recordingsDir, keep, '.mp4'), ...pruneDir(guidesDir, keep, '.pdf')]);
+  const oldGuides = pruneDir(guidesDir, keep, '.pdf');
+  for (const g of oldGuides) rmSync(guideFolder(join(guidesDir, g)), { recursive: true, force: true }); // its editable document
+  const gone = new Set([...pruneDir(recordingsDir, keep, '.mp4'), ...oldGuides]);
   if (!gone.size) return;
   // history keeps the run, without links to files that no longer exist
   for (const r of listRuns()) if (gone.has(r.video) || gone.has(r.guide))
@@ -326,6 +333,9 @@ When done, answer in English (even if the task is written in another language) w
 1. A first line exactly "RESULT: SUCCESS" or "RESULT: FAILED", then the evidence (message, URL, number shown on screen).
 2. A @playwright/test TypeScript test in one \`\`\`ts block that replays the steps, using role/label/placeholder locators. Keep every double-brace value as a literal string, e.g. '{{ADMIN_PASS}}' or '{{today}}'.`;
 
+// the project's source folders, if set (only the Claude Code engine reads it)
+const codebaseOf = id => { try { return id ? readProject(id).codebase : undefined; } catch { return undefined; } };
+
 const stamp = t => new Date(t).toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
 // Shared shell for AI runs and replays: SSE stream, abort, recording, history entry
@@ -352,8 +362,8 @@ async function runOnStage(res, { kind, record, guide, label, project }, body) {
   active.set(id, run);
   const rec = loadRecording();
   if (rec.device) entry.device = rec.device;
-  let stopRecording;
-  const steps = guide ? guideCollector(stage.currentFrame) : null;
+  let recorder;
+  const steps = guide || record ? guideCollector(stage.currentFrame, () => recorder?.at()) : null; // PDF steps, video captions
   const mask = secretMasker(projectSecrets(project));
   const addGuideStep = step => { if (!steps) return; if (step && !step.section) step.detail = mask(step.detail ?? ''); steps.add(step); };
   const stopBoxes = steps ? stage.onHighlight((frame, info) => steps.highlight(frame, info)) : null;
@@ -373,7 +383,7 @@ async function runOnStage(res, { kind, record, guide, label, project }, body) {
   });
   send('run', { id });
   try {
-    await body({ send, signal: abort.signal, entry, rec, runDir, stage, mask, addGuideStep, startRecording: () => { if (record && !stopRecording) stopRecording = stage.startRecording(join(recordingsDir, video), rec); } });
+    await body({ send, signal: abort.signal, entry, rec, runDir, stage, mask, addGuideStep, startRecording: () => { if (record && !recorder) recorder = stage.startRecording(join(recordingsDir, video), rec); } });
   } catch (e) {
     entry.status = abort.signal.aborted ? 'stopped' : 'error';
     if (entry.status === 'stopped') send('stopped', 'Stopped'); else { entry.error = e.message; send('fail', e.message); }
@@ -388,14 +398,23 @@ async function runOnStage(res, { kind, record, guide, label, project }, body) {
       entry.error = `Blocked: the run tried to open ${entry.blocked}, a production address (Settings > Environments). The browser never reached it.`;
       send('fail', entry.error);
     }
-    if (stopRecording) {
-      const err = await stopRecording(); // saved even when the run failed or was stopped: that's when you need it most
-      if (err) send('fail', `Recording failed: ${err}`); else { entry.video = video; send('video', `/recordings/${video}`); }
-    }
     stopBoxes?.(); stopIssues();
-    if (steps) {
+    const done = steps?.finish();
+    if (recorder) {
+      const err = await recorder.stop(); // saved even when the run failed or was stopped: that's when you need it most
+      if (err) send('fail', `Recording failed: ${err}`);
+      else {
+        const meta = readProject(project), { lang, accent } = loadGuide();
+        let n = 0;
+        const captions = done.filter(s => !s.section).map(s => ({ n: ++n, at: s.at, text: translateStep(s.what, lang), zoom: s.box?.zoom, hold: entersValue(s.what) })).filter(c => c.at !== undefined);
+        const cardErr = await finishVideo(join(recordingsDir, video), { ...rec, title: runTitle(entry, guideLabels(lang).suite), app: meta.app || meta.name, logo: projectLogoDataUrl(project) || logoDataUrl(), accent, captions });
+        if (cardErr) send('log', `Title card and captions skipped: ${cardErr}`);
+        entry.video = video; send('video', `/recordings/${video}`);
+      }
+    }
+    if (guide) {
       const name = `${stamp(started)}-${label}-${tag}.pdf`;
-      try { await buildGuidePdf(entry, steps.finish(), join(guidesDir, name), { ...loadGuide(), logo: logoDataUrl() }); entry.guide = name; send('guide', `/guides/${name}`); }
+      try { await buildGuidePdf(entry, done, join(guidesDir, name), { ...loadGuide(), logo: projectLogoDataUrl(project) || logoDataUrl() }); entry.guide = name; entry.guideDoc = true; send('guide', `/guides/${name}`); }
       catch (e) { send('fail', `PDF guide failed: ${e.message}`); }
     }
     addRun(entry);
@@ -406,9 +425,9 @@ async function runOnStage(res, { kind, record, guide, label, project }, body) {
   }
 }
 
-function aiRun(res, { project, url, task, provider, model, record, guide, session, flow, env, expected }) {
+function aiRun(res, { project, url, title, task, provider, model, record, guide, session, flow, env, expected }) {
   return withRun(res, { kind: 'ai', record, guide, label: provider.id, project, locks: dbLock(project, env) }, async ({ send, signal, entry, rec, runDir, stage, startRecording, addGuideStep }) => {
-    Object.assign(entry, { url, task, provider: provider.label, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, steps: [] });
+    Object.assign(entry, { url, title: title || undefined, task, provider: provider.label, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, steps: [] });
     await resetDatabase(project, env, line => send('text', line));
     const startUrl = makeResolver({ vars: env.vars }).fill(url); // {{baseUrl}} in the URL field
     const sessionData = session ? JSON.parse(readFileSync(pickSession(project, session), 'utf8')) : null;
@@ -430,7 +449,7 @@ function aiRun(res, { project, url, task, provider, model, record, guide, sessio
       send(type, data);
     };
     const { text } = await engines[provider.engine]({
-      provider, model: model || provider.model, prompt, system: SYSTEM, ...mcp, cwd: dir,
+      provider, model: model || provider.model, prompt, system: SYSTEM, ...mcp, cwd: dir, codebase: codebaseOf(project),
     }, emit, signal);
     const { evidence, script } = splitAnswer(text);
     // with an expectation, both the task and the expectation must hold; the AI's word alone is not enough
@@ -537,7 +556,7 @@ function fixRun(res, { run, name, provider, model, env }) {
 4. Otherwise answer RESULT: SUCCESS, explain in 1-3 bullets what was wrong and what you changed, and give the complete corrected test file in one \`\`\`ts block. Keep the test title, the steps that already work, and secrets as '{{NAME}}'. Prefer getByRole/getByLabel locators and expect() waits over fixed timeouts.`,
     ].filter(Boolean).join('\n\n');
     const emit = (type, data) => { if (type === 'tool' && entry.steps.length < 300) entry.steps.push(data); send(type, data); };
-    const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: SYSTEM, ...mcp, cwd: dir }, emit, signal);
+    const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: SYSTEM, ...mcp, cwd: dir, codebase: codebaseOf(project) }, emit, signal);
     const { evidence, script } = splitAnswer(text);
     Object.assign(entry, { text, evidence });
     if (!/RESULT:\s*SUCCESS/.test(text) || !script || !/\btest\(/.test(script)) {
@@ -650,7 +669,7 @@ function workflowRun(res, { project, wf, params, env, session, record, guide, pr
             if (type === 'tool') { if (entry.steps.length < 500) entry.steps.push({ ...data, block: index }); addGuideStep(aiStep(data)); }
             send(type, data);
           };
-          const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: WF_SYSTEM, ...mcp, cwd: dir }, emit, signal);
+          const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: WF_SYSTEM, ...mcp, cwd: dir, codebase: codebaseOf(project) }, emit, signal);
           result = readAnswer(b, text);
         }
       } catch (e) {
@@ -752,7 +771,7 @@ async function route(req, res) {
   const q = k => u.searchParams.get(k) ?? '';
 
   // the page itself: it shows the login screen when there is no session
-  if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'set-cookie': `abr_page=${pageToken}; HttpOnly; SameSite=Strict; Path=/` }); return res.end(readFileSync(join(dir, 'index.html'))); }
+  if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-abr-folder': encodeURIComponent(join(dir, '..')), 'set-cookie': `abr_page=${pageToken}; HttpOnly; SameSite=Strict; Path=/` }); return res.end(readFileSync(join(dir, 'index.html'))); }
   const STATIC = { '/shared.mjs': 'text/javascript', '/app.js': 'text/javascript', '/studio.js': 'text/javascript', '/app.css': 'text/css' };
   if (STATIC[p]) { res.writeHead(200, { 'content-type': `${STATIC[p]}; charset=utf-8` }); return res.end(readFileSync(join(dir, p.slice(1)))); }
   if (!fromOurPage(req)) throw denied('Open the app from its own page (reload it after the app restarts)');
@@ -778,6 +797,24 @@ async function route(req, res) {
   }
   const visMatch = p.match(/^\/visual\/([\w-]+)\/([\w.-]+\.(png|jpg))$/);
   if (visMatch) { runOr404(getRun(visMatch[1])); return sendFile(res, join(visualDir, visMatch[1], visMatch[2]), { 'content-type': visMatch[3] === 'jpg' ? 'image/jpeg' : 'image/png' }); }
+  // the guide editor: the document behind a PDF, its screenshots, and saving it (the PDF is made again)
+  const guideDocMatch = p.match(/^\/guides\/([\w-]+\.pdf)\/(doc|frame|\d{3}\.(?:jpg|png))$/);
+  if (guideDocMatch) {
+    const [, pdf, part] = guideDocMatch;
+    const run = runOr404(runOfFile('guide', pdf));
+    const folder = guideFolder(join(guidesDir, pdf));
+    if (!existsSync(join(folder, 'doc.json'))) throw denied('This guide was made before guides could be edited: run it again to edit its guide', 404);
+    if (part === 'frame' && m === 'POST') return json(res, { frame: addGuideFrame(folder, (await readBody(req, 15_000_000)).dataUrl) }); // Replace image
+    if (part !== 'doc') { if (!FRAME_FILE.test(part)) throw denied('Not found', 404); return sendFile(res, join(folder, part), { 'content-type': frameType(part) }); }
+    if (m === 'GET') return json(res, readGuideDoc(folder));
+    if (m === 'PUT') {
+      const doc = cleanGuideDoc((await readBody(req, 5_000_000)).doc, readGuideDoc(folder), guideFrames(folder));
+      writeFileSync(join(folder, 'doc.json'), JSON.stringify(doc, null, 1));
+      pruneGuideFrames(folder, doc);
+      await renderGuidePdf(doc, folder, join(guidesDir, pdf), { ...loadGuide(), logo: projectLogoDataUrl(run.project) || logoDataUrl() });
+      return json(res, { ok: true, pdf: `/guides/${pdf}` });
+    }
+  }
   const guideMatch = p.match(/^\/guides\/([\w-]+\.pdf)$/);
   if (guideMatch) {
     runOr404(runOfFile('guide', guideMatch[1]));
@@ -817,7 +854,7 @@ async function route(req, res) {
       return {
         ...pr, tests: listTests(pr.id).map(t => t.name), runs: own.length,
         last: own[0] ? { status: own[0].status, started: own[0].started } : null, recent: own.slice(0, 12).map(r => r.status),
-        secrets: projectSecrets(pr.id), sessions: listSessions(pr.id),
+        secrets: projectSecrets(pr.id), sessions: listSessions(pr.id), hasLogo: Boolean(projectLogoDataUrl(pr.id)),
         db, dbPassSet: Object.fromEntries(Object.keys(db ?? {}).map(e => [e, Boolean(process.env[dbPassKey(pr.id, e)])])),
       };
     }));
@@ -832,6 +869,18 @@ async function route(req, res) {
     for (const [envName, pass] of Object.entries(dbPasswords)) if (pass && db[envName]) saveEnv(dbPassKey(id, envName), String(pass));
     return json(res, { id });
   }
+  /* ----- first run: what this computer still needs ----- */
+  if (p === '/setup/status' && m === 'GET') return json(res, { os: process.platform, osName: OS_NAMES[process.platform] ?? process.platform, portable: Boolean(process.env.ABR_PORTABLE), items: await checkRequirements({ root: join(dir, '..') }) });
+  if (p === '/setup/browsers' && m === 'GET') { // download Chromium, the installer's lines streamed
+    if (browsersInstalling) throw new Error('Chromium is already being downloaded');
+    browsersInstalling = true;
+    sse(res);
+    const send = (type, data) => { if (!res.destroyed) res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); };
+    try { send('done', { ok: await installBrowsers(join(dir, '..'), line => send('log', line)) }); }
+    finally { browsersInstalling = false; res.end(); }
+    return;
+  }
+  if (p === '/folders' && m === 'GET') return json(res, listFolders(q('path'))); // codebase folder picker: names only
   if (p === '/db/test' && m === 'POST') { // settings not saved yet: the password typed now, else the saved one
     const { project: pr, env: envName, config, password } = await readBody(req);
     if (pr) projectDir(pr);
@@ -847,7 +896,7 @@ async function route(req, res) {
     rmSync(join(sessionsDir, id), { recursive: true, force: true });
     for (const r of removeRuns(id)) {
       if (r.video) rmSync(join(recordingsDir, r.video), { force: true });
-      if (r.guide) rmSync(join(guidesDir, r.guide), { force: true });
+      if (r.guide) { rmSync(join(guidesDir, r.guide), { force: true }); rmSync(guideFolder(join(guidesDir, r.guide)), { recursive: true, force: true }); }
       rmSync(join(visualDir, r.id), { recursive: true, force: true });
     }
     res.writeHead(204); return res.end();
@@ -856,35 +905,41 @@ async function route(req, res) {
   const expMatch = p.match(/^\/projects\/([a-z0-9-]+)\/export$/);
   if (expMatch && m === 'GET') {
     const id = expMatch[1];
-    const { id: _, ...meta } = readProject(id);
+    const { id: _, codebase: __, ...meta } = readProject(id); // the codebase folder is this computer's
     const bundle = packProject(projectDir(id), { id, ...meta }, projectSecrets(id));
     res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': `attachment; filename="${id}.abr.json"` });
     return res.end(JSON.stringify(bundle));
   }
+  if (p === '/projects/export' && m === 'GET') { // every project in one file
+    const bundles = listProjects().map(({ id, codebase: _, ...meta }) => packProject(projectDir(id), { id, ...meta }, projectSecrets(id)));
+    res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': `attachment; filename="abra-projects-${new Date().toISOString().slice(0, 10)}.abr.json"` });
+    return res.end(JSON.stringify(packAll(bundles)));
+  }
+  if (p === '/projects/demo' && m === 'POST') { // the practice project a new user starts with (app/demo), through the normal import checks
+    if (listProjects().some(pr => pr.id === 'saucedemo')) return json(res, { id: 'saucedemo' });
+    return json(res, importProject(unpackBundle(JSON.parse(readFileSync(join(dir, 'demo', 'saucedemo.abr.json'), 'utf8'))), 'new'));
+  }
   if (p === '/projects/import' && m === 'POST') {
-    const { bundle, mode } = await readBody(req, 20_000_000);
-    const { project, secrets, files } = unpackBundle(bundle); // throws before anything is written
-    const envNames = new Set(loadEnvironments().map(e => e.name));
-    const skippedDb = Object.keys(project.db ?? {}).filter(e => !envNames.has(e));
-    const db = validDb(Object.fromEntries(Object.entries(project.db ?? {}).filter(([e]) => envNames.has(e))));
-    const taken = id => listProjects().some(pr => pr.id === id) || existsSync(join(testsDir, id));
-    let id = project.id, name = project.name.trim();
-    // overwrite only a real project: a plain folder under tests/ is not ours to empty
-    if (mode === 'overwrite' && taken(id) && !listProjects().some(pr => pr.id === id)) throw new Error(`tests/${id} is not a project; import it as a new project instead`);
-    if (taken(id) && mode !== 'overwrite') {
-      let n = 2; while (taken(`${project.id}-${n}`)) n++;
-      if (mode !== 'new') return json(res, { conflict: id, suggestion: `${project.id}-${n}` }, 409);
-      id = `${project.id}-${n}`; name = `${project.name} (${n})`;
+    const { bundle, mode } = await readBody(req, 200_000_000);
+    if (!isAll(bundle)) { // one project
+      const result = importProject(unpackBundle(bundle), mode); // unpackBundle throws before anything is written
+      return result.conflict ? json(res, result, 409) : json(res, result);
     }
-    const dir = join(testsDir, id);
-    if (mode === 'overwrite' && existsSync(dir)) for (const f of readdirSync(dir)) if (f !== 'project.json') rmSync(join(dir, f), { recursive: true, force: true });
-    mkdirSync(dir, { recursive: true });
-    const { created } = existsSync(join(dir, 'project.json')) ? JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')) : {};
-    writeFileSync(join(dir, 'project.json'), JSON.stringify({ name, description: project.description ?? '', url: project.url ?? '', env: envNames.has(project.env) ? project.env : '', ...(Object.keys(db).length && { db }), created: created ?? Date.now() }, null, 2) + '\n');
-    for (const f of files) { mkdirSync(join(dir, f.path, '..'), { recursive: true }); writeFileSync(join(dir, f.path), f.data); }
-    // never bind secrets by itself: an imported workflow could send them anywhere. The user ticks them in Settings.
-    const have = new Set(secretNames());
-    return json(res, { id, files: files.length, unboundSecrets: secrets.filter(n => have.has(n)), missingSecrets: secrets.filter(n => !have.has(n)), missingVars: missingVars(files, loadEnvironments()), skippedDb });
+    // every project in the file: all of them checked first, then asked once what to do with the ones already here
+    const parts = unpackAll(bundle);
+    const conflicts = parts.map(x => x.project.id).filter(projectTaken);
+    if (conflicts.length && !['overwrite', 'new', 'skip'].includes(mode)) return json(res, { conflicts }, 409);
+    if (mode === 'overwrite') for (const id of conflicts) if (!listProjects().some(pr => pr.id === id)) throw new Error(`tests/${id} is not a project; import as new copies or skip it`);
+    return json(res, { all: true, results: parts.map(x => (mode === 'skip' && projectTaken(x.project.id) ? { skipped: x.project.id } : importProject(x, mode))) });
+  }
+  const projLogo = p.match(/^\/projects\/([a-z0-9-]+)\/logo$/);
+  if (projLogo && m === 'POST') { saveProjectLogo(projLogo[1], (await readBody(req)).dataUrl); return json(res, { ok: true }); }
+  if (projLogo && m === 'DELETE') { deleteProjectLogo(projLogo[1]); res.writeHead(204); return res.end(); }
+  if (projLogo && m === 'GET') {
+    const url = projectLogoDataUrl(projLogo[1]);
+    if (!url) { res.writeHead(404); return res.end(); }
+    const [, type, b64] = url.match(/^data:([^;]+);base64,(.*)$/);
+    res.writeHead(200, { 'content-type': type }); return res.end(Buffer.from(b64, 'base64'));
   }
   const projSes = p.match(/^\/projects\/([a-z0-9-]+)\/sessions\/([a-z0-9-]+)$/);
   if (projSes && m === 'DELETE') { projectDir(projSes[1]); unlinkSync(sessionFile(projSes[1], projSes[2])); res.writeHead(204); return res.end(); }
@@ -997,7 +1052,7 @@ async function route(req, res) {
     res.writeHead(200, { 'content-type': type }); return res.end(Buffer.from(b64, 'base64'));
   }
   if (p === '/notify/test' && m === 'POST') {
-    const sent = await notify(loadSettingsFile().notify ?? {}, '🔔 Test message from AI Browser Runner: notifications work.');
+    const sent = await notify(loadSettingsFile().notify ?? {}, '🔔 Test message from ABRA: notifications work.');
     if (!sent.length) throw new Error('Nothing is set up: add the secret TELEGRAM_TOKEN plus a chat id, or the secret SLACK_WEBHOOK');
     return json(res, { sent });
   }
@@ -1046,7 +1101,7 @@ async function route(req, res) {
       noProduction(makeResolver({ vars: env.vars }).fill(url));
       const flow = q('flow'); if (flow) flowScript(flow); // validates before streaming
       sse(res);
-      return aiRun(res, { project, url, task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim() });
+      return aiRun(res, { project, url, title: q('title').trim().slice(0, 100), task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim() });
     }
     const names = q('tests').split(',').filter(Boolean);
     if (!names.length) throw new Error('Select at least one test');
@@ -1059,9 +1114,58 @@ async function route(req, res) {
   res.writeHead(404); res.end();
 }
 
-http.createServer((req, res) => {
+// Writes one unpacked project bundle. mode: undefined (answers a conflict), 'overwrite' or 'new' (a copy "<id>-2").
+const projectTaken = id => listProjects().some(pr => pr.id === id) || existsSync(join(testsDir, id));
+function importProject({ project, secrets, files }, mode) {
+  const envNames = new Set(loadEnvironments().map(e => e.name));
+  const skippedDb = Object.keys(project.db ?? {}).filter(e => !envNames.has(e));
+  const db = validDb(Object.fromEntries(Object.entries(project.db ?? {}).filter(([e]) => envNames.has(e))));
+  let id = project.id, name = project.name.trim();
+  // overwrite only a real project: a plain folder under tests/ is not ours to empty
+  if (mode === 'overwrite' && projectTaken(id) && !listProjects().some(pr => pr.id === id)) throw new Error(`tests/${id} is not a project; import it as a new project instead`);
+  if (projectTaken(id) && mode !== 'overwrite') {
+    let n = 2; while (projectTaken(`${project.id}-${n}`)) n++;
+    if (mode !== 'new') return { conflict: id, suggestion: `${project.id}-${n}` };
+    id = `${project.id}-${n}`; name = `${project.name} (${n})`;
+  }
+  const dir = join(testsDir, id);
+  if (mode === 'overwrite' && existsSync(dir)) for (const f of readdirSync(dir)) if (f !== 'project.json') rmSync(join(dir, f), { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  const { created, codebase } = existsSync(join(dir, 'project.json')) ? JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')) : {};
+  writeFileSync(join(dir, 'project.json'), JSON.stringify({ name, description: project.description ?? '', url: project.url ?? '', app: project.app ?? '', env: envNames.has(project.env) ? project.env : '', ...(Object.keys(db).length && { db }), ...(codebase && { codebase }), created: created ?? Date.now() }, null, 2) + '\n');
+  for (const f of files) { mkdirSync(join(dir, f.path, '..'), { recursive: true }); writeFileSync(join(dir, f.path), f.data); }
+  // never bind secrets by itself: an imported workflow could send them anywhere. The user ticks them in Settings.
+  const have = new Set(secretNames());
+  return { id, files: files.length, unboundSecrets: secrets.filter(n => have.has(n)), missingSecrets: secrets.filter(n => !have.has(n)), missingVars: missingVars(files, loadEnvironments()), skippedDb };
+}
+
+const server = http.createServer((req, res) => {
   if (!sameOrigin(req)) { res.writeHead(403); return res.end('forbidden'); }
   route(req, res).catch(e => { if (!res.headersSent) fail(res, e); else res.end(); });
-}).listen(PORT, '127.0.0.1', () => { // this computer only: nothing else on the network can reach it
-  console.log(`AI Browser Runner → http://127.0.0.1:${PORT}`);
 });
+// The port is taken: this same app already running (a second start) just opens it; anything else says what to do
+server.on('error', async e => {
+  if (e.code !== 'EADDRINUSE') throw e;
+  const url = `http://127.0.0.1:${PORT}`;
+  const folder = await fetch(url, { signal: AbortSignal.timeout(3000) }).then(r => r.headers.get('x-abr-folder'), () => null);
+  const here = join(dir, '..');
+  if (folder && decodeURIComponent(folder) === here) {
+    console.log(`ABRA is already running → ${url}`);
+    if (process.env.ABR_OPEN) openWindow(url, false);
+    process.exit(0);
+  }
+  const other = process.platform === 'win32' ? `set PORT=${PORT + 1} && start.cmd` : process.env.ABR_PORTABLE ? `PORT=${PORT + 1} ./start.sh` : `PORT=${PORT + 1} npm run app`;
+  console.error(`\nPort ${PORT} is already in use${folder ? ` by another copy of ABRA (${decodeURIComponent(folder)})` : ' by another program'}.
+Close it, or start this one on another port:  ${other}\n`);
+  process.exit(1);
+});
+server.listen(PORT, '127.0.0.1', () => { // this computer only: nothing else on the network can reach it
+  console.log(`ABRA → http://127.0.0.1:${PORT}`);
+  if (process.env.ABR_OPEN) openWindow(`http://127.0.0.1:${PORT}`, true); // the portable launcher asks for this
+});
+
+// The app's own window (see window.mjs). quitWithIt: closing the window stops the app, like any desktop app.
+function openWindow(url, quitWithIt) {
+  const onClose = () => { if (quitWithIt) { console.log('Window closed: ABRA stopped.'); process.exit(0); } };
+  openAppWindow(url, { profile: join(dataDir, 'window'), bundled: bundledChromium.executablePath(), onClose });
+}

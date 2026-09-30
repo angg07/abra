@@ -86,7 +86,15 @@ function highlighter() {
       : !text && r.width <= 64 && r.height <= 64 ? 'icon'
       : tag === 'a' || role === 'link' ? 'link' : tag === 'button' || role === 'button' || ['button', 'submit'].includes(type) ? 'button'
       : tag === 'li' ? 'item' : 'element';
-    return { name: cut(name), kind };
+    return { name: cut(name), kind, zoom: zoomArea(el) };
+  };
+  // the form or modal the element is in (the video zooms in on it), clipped to the viewport
+  const zoomArea = el => {
+    const a = el.closest?.('dialog,[role=dialog],[role=alertdialog],[aria-modal="true"],.modal-content,form');
+    if (!a) return undefined;
+    const r = a.getBoundingClientRect(), x = Math.max(r.left, 0), y = Math.max(r.top, 0);
+    const w = Math.min(r.right, innerWidth) - x, h = Math.min(r.bottom, innerHeight) - y;
+    return w > 0 && h > 0 ? { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h), vw: innerWidth, vh: innerHeight } : undefined;
   };
   const isField = el => el?.matches?.('input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]),textarea,select,[contenteditable=""],[contenteditable="true"]');
   const clickable = el => el.closest?.('a,button,input,select,textarea,label,summary,[role],[onclick],[tabindex],li,td') || el;
@@ -300,7 +308,9 @@ export function createStage(ports) {
       mkdirSync(dirname(file), { recursive: true });
       const ff = spawn(process.env.FFMPEG ?? 'ffmpeg', [
         '-loglevel', 'error', '-f', 'image2pipe', '-c:v', 'mjpeg', '-framerate', String(fps), '-i', '-',
-        '-vf', `scale=${width}:${height}`, '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', file,
+        // the screencast's JPEGs are full-range; browsers play H.264 as limited range, which would wash light greys
+        // (page backgrounds) out to white. out_range=tv keeps them as they look in the browser.
+        '-vf', `scale=${width}:${height}:out_range=tv,format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-bsf:v', 'h264_metadata=video_full_range_flag=0', '-movflags', '+faststart', '-y', file,
       ], { stdio: ['pipe', 'ignore', 'pipe'] });
       let err = '', frames = 0;
       ff.stderr.on('data', d => { err += d; });
@@ -311,13 +321,15 @@ export function createStage(ports) {
       // holds the frame that shows it for HOLD_S. Frames are added, not replaced: nothing of the run is cut.
       const HOLD_S = 0.7;
       const stopHolding = onHighlight(frame => { if (frame) for (let i = 0; i < Math.round(fps * HOLD_S); i++) write(frame); });
-      return () => new Promise(resolve => {
+      const stop = () => new Promise(resolve => {
         clearInterval(timer);
         stopHolding();
         ff.on('close', code => resolve(code === 0 && frames ? null : (err.trim() || 'no frames captured')));
         ff.on('error', e => resolve(`cannot start ffmpeg: ${e.message}`));
         ff.stdin.end();
       });
+      // at(): the video's current position in seconds (held frames included), for captions timed to steps
+      return { stop, at: () => frames / fps };
     },
 
     // The AI browser stays open after a run so its login can be saved, but not forever: it holds a few hundred MB

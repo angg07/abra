@@ -2,7 +2,8 @@
 // @playwright/test files in that folder (data sets in tests/<project>/data/), so they also run from the CLI.
 // tests/support/ holds the helpers every project shares.
 import { readdirSync, readFileSync, writeFileSync, existsSync, statSync, unlinkSync, mkdirSync, rmSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, isAbsolute, resolve } from 'node:path';
+import { homedir } from 'node:os';
 
 export const testsDir = join(import.meta.dirname, '..', 'tests');
 const NAME = /^[a-z0-9][a-z0-9-]{0,59}$/;
@@ -25,12 +26,18 @@ export const listProjects = () => (existsSync(testsDir) ? readdirSync(testsDir, 
 
 // id undefined = create (the id comes from the name and never changes, so renaming keeps the folder)
 // db: the application's database per environment, already validated by the server (passwords live in .env)
-export function saveProject(id, { name, description = '', url = '', env = '', db } = {}) {
-  name = String(name ?? '').trim(); description = String(description).trim(); url = String(url).trim();
+// codebase: the application's source folders on this computer (e.g. frontend and backend; the AI may read them),
+// a list or one path per line; never exported
+export function saveProject(id, { name, description = '', url = '', env = '', app = '', codebase = [], db } = {}) {
+  name = String(name ?? '').trim(); description = String(description).trim(); url = String(url).trim(); app = String(app).trim();
+  codebase = [...new Set((Array.isArray(codebase) ? codebase : String(codebase).split('\n')).map(f => String(f).trim()).filter(Boolean))];
+  if (codebase.length > 10) throw new Error('Codebase folders: at most 10');
+  for (const f of codebase) if (!isAbsolute(f) || !existsSync(f) || !statSync(f).isDirectory()) throw new Error(`Codebase folder "${f}": a full path to an existing folder`);
   if (!name || name.length > 60) throw new Error('Project name: 1 to 60 characters');
+  if (app.length > 60) throw new Error('Application name: at most 60 characters');
   if (description.length > 300) throw new Error('Description: at most 300 characters');
   if (url && !/^(https?:\/\/|\{\{)\S+$/.test(url)) throw new Error('Start URL must start with http(s):// or {{');
-  const meta = { name, description, url, env: String(env), ...(db && { db }) };
+  const meta = { name, description, url, env: String(env), app, codebase, ...(db && { db }) };
   if (id) { const { id: _, ...old } = readProject(id); writeFileSync(metaOf(id), JSON.stringify({ ...old, ...meta }, null, 2) + '\n'); return id; }
   const newId = slug(name).slice(0, 40).replace(/-+$/, '');
   if (!newId || RESERVED.has(newId)) throw new Error('Choose another project name');
@@ -39,7 +46,31 @@ export function saveProject(id, { name, description = '', url = '', env = '', db
   writeFileSync(metaOf(newId), JSON.stringify({ ...meta, created: Date.now() }, null, 2) + '\n');
   return newId;
 }
+// The folder picker for codebase folders (the browser cannot tell the page a folder's full path): the
+// subfolders of one folder, names only. Starts at the home folder.
+export function listFolders(path = '') {
+  const here = resolve(String(path).trim() || homedir());
+  if (!existsSync(here) || !statSync(here).isDirectory()) throw new Error(`Not a folder: ${here}`);
+  const dirs = readdirSync(here, { withFileTypes: true })
+    .filter(d => d.isDirectory() || (d.isSymbolicLink() && (() => { try { return statSync(join(here, d.name)).isDirectory(); } catch { return false; } })()))
+    .map(d => d.name).sort((a, b) => a.startsWith('.') - b.startsWith('.') || a.localeCompare(b))
+    .map(name => ({ name, path: join(here, name) }));
+  const parent = dirname(here);
+  return { path: here, parent: parent === here ? null : parent, home: homedir(), dirs };
+}
 export const deleteProject = id => rmSync(projectDir(id), { recursive: true });
+
+// The project's logo (video title card, PDF cover): tests/<id>/logo.png or logo.jpg, so it travels with an export
+const LOGO_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg' };
+export const projectLogo = id => ['png', 'jpg'].map(ext => join(projectDir(id), `logo.${ext}`)).find(existsSync) ?? null;
+export function saveProjectLogo(id, dataUrl) {
+  const match = String(dataUrl ?? '').match(/^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) throw new Error('The logo must be a PNG or JPG image');
+  deleteProjectLogo(id);
+  writeFileSync(join(projectDir(id), `logo.${LOGO_TYPES[match[1]]}`), Buffer.from(match[2], 'base64'));
+}
+export const deleteProjectLogo = id => { for (const ext of ['png', 'jpg']) rmSync(join(projectDir(id), `logo.${ext}`), { force: true }); };
+export const projectLogoDataUrl = id => { const f = projectLogo(id); return f ? `data:image/${f.endsWith('png') ? 'png' : 'jpeg'};base64,${readFileSync(f).toString('base64')}` : ''; };
 
 /* ---------- saved tests ---------- */
 const fileOf = (project, name) => {

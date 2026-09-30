@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>ABRA</title>
+<style>
+  :root { --bg:#F4F6F8; --ink:#17202A; --muted:#5E6B78; --accent:#2B59C3; --fail:#C2352B; --card:#FFFFFF; --line:#DDE3E9; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#12161B; --ink:#E6EAEE; --muted:#9AA5B1; --accent:#7FA2F5; --fail:#F08A80; --card:#1A2027; --line:#2A323C; } }
+  html, body { height:100%; margin:0; }
+  body { display:grid; place-items:center; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui, 'Segoe UI', sans-serif; }
+  main { display:grid; justify-items:center; gap:16px; padding:24px; max-width:640px; text-align:center; }
+  .spin { width:34px; height:34px; border-radius:50%; border:3px solid var(--line); border-top-color:var(--accent); animation:spin .9s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  h1 { margin:0; font-size:18px; }
+  p { margin:0; color:var(--muted); }
+  pre { margin:0; text-align:left; white-space:pre-wrap; overflow-wrap:anywhere; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; font:12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; color:var(--ink); max-height:50vh; overflow:auto; width:100%; box-sizing:border-box; }
+  .error h1 { color:var(--fail); }
+  @media (prefers-reduced-motion: reduce) { .spin { animation:none; } }
+</style>
+</head>
+<body>
+<main id="m">
+  <div class="spin" aria-hidden="true"></div>
+  <h1>Starting ABRA…</h1>
+  <p>The first start after installing or updating takes a little longer.</p>
+</main>
+<script>
+  // main.cjs shows a start-up error here as #error=<title>\n\n<details>
+  const err = decodeURIComponent((location.hash.match(/^#error=(.*)$/) || [])[1] || '');
+  if (err) {
+    const [title, ...rest] = err.split('\n\n');
+    const m = document.getElementById('m');
+    m.className = 'error';
+    m.innerHTML = '<h1></h1><p>Close the app and start it again. If it keeps happening, these are the last lines of its log:</p><pre></pre>';
+    m.querySelector('h1').textContent = title;
+    m.querySelector('pre').textContent = rest.join('\n\n') || '(the log is empty)';
+  }
+</script>
+</body>
+</html>

@@ -40,10 +40,10 @@ const bad = [
   ['test under data/', withFile('data/x.spec.ts', { text: '' }), /not allowed/],
   ['png as text', withFile('login.spec.ts-snapshots/a.png', { text: 'x' }), /base64/],
   ['both text and base64', withFile('a.spec.ts', { text: 'x', base64: 'eA==' }), /exactly one/],
-  ['wrong format', { ...good(), format: 'zip' }, /not an AI Browser Runner project file/],
+  ['wrong format', { ...good(), format: 'zip' }, /not an ABRA project file/],
   ['wrong version', { ...good(), version: 2 }, /version 2/],
   ['bad project id', { ...good(), project: { id: '../x', name: 'X' } }, /project id/],
-  ['not an object', 'hello', /not an AI Browser Runner project file/],
+  ['not an object', 'hello', /not an ABRA project file/],
 ];
 for (const [name, bundle, message] of bad)
   test(`rejects: ${name}`, () => assert.throws(() => unpackBundle(bundle), message));

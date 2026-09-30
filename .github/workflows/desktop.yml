@@ -1,0 +1,60 @@
+# The desktop app for Linux (AppImage, deb), Windows (installer) and macOS (dmg, Intel and Apple Silicon), each
+# built on its own OS. Run it by hand (Actions > Desktop app > Run workflow) or push a tag like v1.0.0: a tag
+# also puts the files on a GitHub release. The files are unsigned (see README, Desktop app).
+name: Desktop app
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux }
+          - { os: windows-latest, target: win }
+          - { os: macos-latest, target: mac }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: npm ci
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run dist -- ${{ matrix.target }}
+        working-directory: desktop
+      # macOS: the app must carry a valid (ad hoc) signature, or Apple Silicon calls it "damaged"; and the Node
+      # inside must still run after signing
+      - if: matrix.target == 'mac'
+        run: |
+          for app in dist/desktop/mac*/*.app; do
+            echo "$app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv "$app" 2>&1 | grep -E 'Signature|Identifier'
+          done
+          "$(ls -d dist/desktop/mac-arm64/*.app)/Contents/Resources/runtime/node" -e "console.log('node', process.version, process.arch)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abra-${{ matrix.target }}
+          path: |
+            dist/desktop/*.AppImage
+            dist/desktop/*.deb
+            dist/desktop/*.exe
+            dist/desktop/*.dmg
+            dist/desktop/latest*.yml
+            dist/desktop/*.blockmap
+          if-no-files-found: error
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/desktop/*.AppImage
+            dist/desktop/*.deb
+            dist/desktop/*.exe
+            dist/desktop/*.dmg
+            dist/desktop/latest*.yml
+            dist/desktop/*.blockmap

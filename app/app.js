@@ -1,4 +1,4 @@
-// AI Browser Runner UI
+// ABRA UI
 import { esc, md, describe, issueLabel, issueDetail, lineDiff, isAppError, isThirdParty, isA11y } from '/shared.mjs';
 import { createStudio, BLOCKS } from '/studio.js';
 
@@ -39,7 +39,12 @@ async function boot() {
   try {
     await loadSettings();
     $('model').value = saved.model || '';
-    route();
+    // first start on this computer: the requirements first. Later starts open right away and check in the
+    // background; something required gone missing (e.g. Chromium deleted) brings the screen back.
+    const setupStatus = () => api('/setup/status').catch(() => null);
+    if (!store.get().setupSeen) { const setup = await setupStatus(); if (setup) { renderSetup(setup); show('setup'); return; } }
+    await route(); // Projects first: the check loads a second Playwright once, which holds the server up briefly
+    setupStatus().then(setup => { if (setup?.items.some(i => i.status === 'bad') && !document.body.classList.contains('running')) { renderSetup(setup); show('setup'); } });
   } catch (err) {
     $('projectList').innerHTML = `<div class="emptybox"><strong>The app could not load</strong>${esc(err.message)}. Check that the server is running (npm run app), then reload this page.</div>`;
   }
@@ -70,7 +75,7 @@ async function route() {
 window.addEventListener('hashchange', route);
 
 function renderHome() {
-  document.title = 'AI Browser Runner';
+  document.title = 'ABRA';
   const card = p => `<article class="project">
       <button type="button" class="open" data-open="${esc(p.id)}">
         <span class="name">${icon('folder')}${esc(p.name)}</span>
@@ -83,7 +88,8 @@ function renderHome() {
       </button>
       ${`<button type="button" class="icon-btn edit" data-edit="${esc(p.id)}" aria-label="Edit ${esc(p.name)}" title="Edit project">${icon('edit')}</button>`}
     </article>`;
-  $('projectList').innerHTML = projects.map(card).join('') + `<article class="project new"><button type="button" class="open" data-new>${icon('plus')}<strong>New project</strong><span>For another application you test</span></button></article>`;
+  const demo = projects.length ? '' : `<article class="project new"><button type="button" class="open" data-demo>${icon('sparkles')}<strong>Try the demo</strong><span>A practice shop with 2 saved tests: press Run and watch</span></button></article>`;
+  $('projectList').innerHTML = projects.map(card).join('') + demo + `<article class="project new"><button type="button" class="open" data-new>${icon('plus')}<strong>New project</strong><span>For another application you test</span></button></article>`;
   applyRoles();
 }
 $('projectList').onclick = e => {
@@ -91,6 +97,7 @@ $('projectList').onclick = e => {
   if (b.dataset.open) location.hash = `#/p/${b.dataset.open}`;
   if (b.dataset.edit) editProject(projects.find(p => p.id === b.dataset.edit));
   if ('new' in b.dataset) editProject(null);
+  if ('demo' in b.dataset) api('/projects/demo', { method: 'POST' }).then(r => { toast('Demo ready: open Saved tests and press Run on a test'); location.hash = `#/p/${r.id}`; }, err => toast(`The demo could not be added: ${err.message}`));
 };
 $('newProject').onclick = () => editProject(null);
 
@@ -119,10 +126,10 @@ $('sideToggle').onclick = () => { const open = $('side').classList.toggle('open'
 $('liveChip').onclick = () => show('run');
 
 async function enterProject() {
-  document.title = `${project.name} · AI Browser Runner`;
+  document.title = `${project.name} · ABRA`;
   $('projName').textContent = project.name;
   const ps = projectState();
-  $('url').value = ps.url ?? project.url ?? ''; $('task').value = ps.task ?? ''; $('expected').value = ps.expected ?? '';
+  $('url').value = ps.url ?? project.url ?? ''; $('task').value = ps.task ?? ''; $('taskTitle').value = ps.title ?? ''; $('expected').value = ps.expected ?? '';
   $('recUrl').value = ps.recUrl ?? project.url ?? '';
   attachFlow(null);
   applyRoles();
@@ -141,6 +148,11 @@ function editProject(p) {
   $('projTitle').textContent = p ? `Edit ${p.name}` : 'New project';
   $('projSave').textContent = p ? 'Save project' : 'Create project';
   $('projNameIn').value = p?.name ?? ''; $('projDesc').value = p?.description ?? ''; $('projUrl').value = p?.url ?? '';
+  $('projApp').value = p?.app ?? '';
+  $('projCodebase').value = [].concat(p?.codebase ?? []).join('\n');
+  $('projLogoField').hidden = !p; // the logo is a file in the project's folder: it needs the project to exist
+  $('projLogoMsg').textContent = '';
+  if (p) showProjLogo(p.hasLogo);
   $('projEnv').replaceChildren(new Option('The default environment', ''), ...testEnvs().map(e => new Option(e.name, e.name)));
   $('projEnv').value = p?.env ?? '';
   $('projDb').replaceChildren(...testEnvs().map(e => dbRow(e.name, p?.db?.[e.name], p?.dbPassSet?.[e.name])));
@@ -155,14 +167,64 @@ function editProject(p) {
 /* ---------- share a project as a file ---------- */
 $('projExport').onclick = () => { location.href = `/projects/${encodeURIComponent(editingProject.id)}/export`; };
 $('importProject').onclick = () => $('importFile').click();
+$('exportAll').onclick = () => {
+  if (!projects.length) { toast('There are no projects to export yet'); return; }
+  location.href = '/projects/export';
+};
+// A question with more than OK/Cancel: resolves with the value of the button picked, or null (Cancel, Esc)
+function choose(title, text, options) {
+  return new Promise(resolve => {
+    $('chooseTitle').textContent = title; $('chooseText').textContent = text;
+    const cancel = Object.assign(document.createElement('button'), { type: 'button', className: 'btn ghost', textContent: 'Cancel' });
+    cancel.onclick = () => $('chooseDlg').close();
+    $('chooseBtns').replaceChildren(cancel, ...options.map(([value, label], i) => {
+      const b = Object.assign(document.createElement('button'), { type: 'button', className: i === 0 ? 'btn' : 'btn ghost', textContent: label });
+      b.onclick = () => { $('chooseDlg').returnValue = value; $('chooseDlg').close(); };
+      return b;
+    }));
+    $('chooseDlg').returnValue = '';
+    $('chooseDlg').addEventListener('close', () => resolve($('chooseDlg').returnValue || null), { once: true });
+    $('chooseDlg').showModal();
+  });
+}
+// what an imported project still needs on this computer
+const importTodo = results => {
+  const all = key => [...new Set(results.flatMap(r => r[key] ?? []))];
+  return [
+    all('missingSecrets').length && `Secrets to add (Settings → Secrets): ${all('missingSecrets').join(', ')}`,
+    all('unboundSecrets').length && `Secrets to give the imported projects, if you trust them (Settings → Secrets): ${all('unboundSecrets').join(', ')}`,
+    all('missingVars').length && `Environment values to add (Settings → Environments): ${all('missingVars').join(', ')}`,
+    all('skippedDb').length && `Database settings skipped for environments you do not have: ${all('skippedDb').join(', ')}`,
+  ].filter(Boolean);
+};
 $('importFile').onchange = async () => {
   const f = $('importFile').files[0]; $('importFile').value = '';
   if (!f) return;
   try {
     const bundle = JSON.parse(await f.text());
-    const names = Object.keys(bundle.files ?? {});
-    if (!confirm(`Import "${bundle.project?.name ?? f.name}" (${names.length} files)?\n\n${names.slice(0, 20).join('\n')}${names.length > 20 ? '\n…' : ''}\n\nTest files are code that runs on this computer: import only files from people you trust.`)) return;
     const send = mode => fetch('/projects/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ bundle, mode }) });
+    const warning = 'Test files are code that runs on this computer: import only files from people you trust.';
+    if (bundle.format === 'ai-browser-runner-projects') { // every project of another computer
+      const list = (bundle.projects ?? []).map(b => `• ${b.project?.name ?? '?'} (${Object.keys(b.files ?? {}).length} files)`);
+      if (!confirm(`Import ${list.length} projects?\n\n${list.slice(0, 25).join('\n')}${list.length > 25 ? '\n…' : ''}\n\n${warning}`)) return;
+      let r = await send();
+      if (r.status === 409) {
+        const { conflicts } = await r.json();
+        const mode = await choose('Some projects are already here', `${conflicts.length} of them already exist on this computer:\n${conflicts.join(', ')}\n\nWhat should happen to those?`,
+          [['skip', 'Skip them'], ['new', 'Import as new copies'], ['overwrite', 'Overwrite their tests']]);
+        if (!mode) return;
+        r = await send(mode);
+      }
+      if (!r.ok) throw new Error(await r.text());
+      const { results } = await r.json();
+      const done = results.filter(x => x.id), skipped = results.filter(x => x.skipped);
+      const todo = importTodo(done);
+      toast(`Imported ${done.length} project${done.length === 1 ? '' : 's'}${skipped.length ? `, skipped ${skipped.length}` : ''}.${todo.length ? ' ' + todo.join('. ') + '.' : ''}`);
+      location.hash = ''; route();
+      return;
+    }
+    const names = Object.keys(bundle.files ?? {});
+    if (!confirm(`Import "${bundle.project?.name ?? f.name}" (${names.length} files)?\n\n${names.slice(0, 20).join('\n')}${names.length > 20 ? '\n…' : ''}\n\n${warning}`)) return;
     let r = await send();
     if (r.status === 409) {
       const { conflict, suggestion } = await r.json();
@@ -171,16 +233,28 @@ $('importFile').onchange = async () => {
     }
     if (!r.ok) throw new Error(await r.text());
     const s = await r.json();
-    const todo = [
-      s.missingSecrets.length && `Secrets to add (Settings → Secrets): ${s.missingSecrets.join(', ')}`,
-      s.unboundSecrets.length && `Secrets to give this project, if you trust it (Settings → Secrets): ${s.unboundSecrets.join(', ')}`,
-      s.missingVars.length && `Environment values to add (Settings → Environments): ${s.missingVars.join(', ')}`,
-      s.skippedDb.length && `Database settings skipped for environments you do not have: ${s.skippedDb.join(', ')}`,
-    ].filter(Boolean);
+    const todo = importTodo([s]);
     toast(`Imported ${s.files} files into "${s.id}".${todo.length ? ' ' + todo.join('. ') + '.' : ''}`);
     location.hash = `#/p/${s.id}`; route();
   } catch (err) { toast(`Import failed: ${err.message}`); }
 };
+
+// project logo: uploaded right away (a file in tests/<project>/, so it is exported with the project)
+function showProjLogo(has) {
+  $('projLogo').hidden = !has; $('projLogoRemove').hidden = !has; $('projLogoNone').hidden = has;
+  if (has) $('projLogo').src = `/projects/${editingProject.id}/logo?${Date.now()}`;
+}
+$('projLogoFile').onchange = () => {
+  const f = $('projLogoFile').files[0]; if (!f) return;
+  if (f.size > 350_000) { $('projLogoMsg').textContent = 'That image is too large: use one under ~350 KB.'; return; }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try { await api(`/projects/${editingProject.id}/logo`, { method: 'POST', body: JSON.stringify({ dataUrl: reader.result }) }); editingProject.hasLogo = true; $('projLogoMsg').textContent = 'Logo saved.'; showProjLogo(true); }
+    catch (err) { $('projLogoMsg').textContent = err.message; }
+  };
+  reader.readAsDataURL(f);
+};
+$('projLogoRemove').onclick = async () => { await api(`/projects/${editingProject.id}/logo`, { method: 'DELETE' }); editingProject.hasLogo = false; $('projLogoFile').value = ''; $('projLogoMsg').textContent = 'Logo removed.'; showProjLogo(false); };
 
 function renderProjSessions() {
   const list = editingProject.sessions ?? [];
@@ -253,11 +327,47 @@ const dbConfigOf = d => {
   return { type: v('dtype').value, host: v('dhost').value.trim(), port: +v('dport').value, database: v('ddb').value.trim(), user: v('duser').value.trim(), reset: v('dreset').checked, template: v('dtemplate').value.trim() };
 };
 $('projCancel').onclick = $('projClose').onclick = () => $('projDlg').close();
+/* codebase folder picker: the server lists folders (a browser cannot give a page a folder's full path) */
+let folderAt = '';
+async function openFolder(path) {
+  try {
+    const r = await api(`/folders?${new URLSearchParams({ path })}`);
+    folderAt = r.path;
+    $('folderPath').textContent = r.path;
+    $('folderUp').disabled = !r.parent;
+    $('folderUp').dataset.path = r.parent ?? '';
+    $('folderHome').dataset.path = r.home;
+    $('folderList').replaceChildren(...(r.dirs.length ? r.dirs.map(d => {
+      const li = document.createElement('li'), b = document.createElement('button');
+      b.type = 'button'; b.className = `folder-item${d.name.startsWith('.') ? ' dot' : ''}`; b.textContent = d.name;
+      b.onclick = () => openFolder(d.path);
+      li.append(b); return li;
+    }) : [Object.assign(document.createElement('li'), { className: 'muted', textContent: 'No subfolders' })]));
+    $('folderErr').textContent = '';
+  } catch (e) { $('folderErr').textContent = e.message; }
+}
+$('projCodebasePick').onclick = async () => {
+  const last = $('projCodebase').value.split('\n').map(l => l.trim()).filter(Boolean).at(-1) ?? '';
+  await openFolder(last);
+  if (last && $('folderErr').textContent) await openFolder(''); // the typed path is gone: start at home
+  $('folderDlg').showModal();
+};
+$('folderUp').onclick = () => openFolder($('folderUp').dataset.path);
+$('folderHome').onclick = () => openFolder($('folderHome').dataset.path);
+$('folderForm').onsubmit = e => {
+  e.preventDefault();
+  const lines = $('projCodebase').value.split('\n').map(l => l.trim()).filter(Boolean);
+  if (folderAt && !lines.includes(folderAt)) lines.push(folderAt);
+  $('projCodebase').value = lines.join('\n');
+  $('folderDlg').close();
+};
+$('folderCancel').onclick = $('folderClose').onclick = () => $('folderDlg').close();
+
 $('projForm').onsubmit = async e => {
   e.preventDefault();
   const rows = [...$('projDb').querySelectorAll('details[data-env]')];
   const body = JSON.stringify({
-    name: $('projNameIn').value, description: $('projDesc').value, url: $('projUrl').value, env: $('projEnv').value,
+    name: $('projNameIn').value, description: $('projDesc').value, url: $('projUrl').value, env: $('projEnv').value, app: $('projApp').value, codebase: $('projCodebase').value,
     db: Object.fromEntries(rows.map(d => [d.dataset.env, dbConfigOf(d)])),
     dbPasswords: Object.fromEntries(rows.map(d => [d.dataset.env, d.querySelector('[name=dpass]').value])),
   });
@@ -295,12 +405,13 @@ function show(view) {
   // leaving Settings with unsaved changes: ask first
   if (view !== 'settings' && !$('view-settings').hidden && settingsDirty().length
     && !confirm(`You have unsaved changes in ${settingsDirty().join(', ')}. Leave without saving?`)) return;
-  for (const v of ['home', 'ai', 'record', 'tests', 'workflows', 'history', 'settings', 'run']) (v === 'home' ? $('home') : $(`view-${v}`)).hidden = v !== view;
+  for (const v of ['home', 'setup', 'guide', 'ai', 'record', 'tests', 'workflows', 'history', 'settings', 'run']) (v === 'home' ? $('home') : $(`view-${v}`)).hidden = v !== view;
   const navView = view === 'run' ? origin : view;
   for (const b of document.querySelectorAll('nav.views button')) b.setAttribute('aria-current', b.dataset.view === navView ? 'page' : 'false');
   $('liveChip').hidden = !document.body.classList.contains('running') || view === 'run';
   for (const b of document.querySelectorAll('.openSettings')) b.setAttribute('aria-current', view === 'settings' ? 'page' : 'false');
-  if (!['settings', 'run'].includes(view)) lastPage = view;
+  if (!['settings', 'run', 'setup', 'guide'].includes(view)) lastPage = view;
+  $('openSetup').setAttribute('aria-current', view === 'setup' ? 'page' : 'false');
   if (view === 'tests') loadTests();
   if (view === 'history') loadHistory();
   if (view === 'workflows') loadWorkflows();
@@ -309,6 +420,180 @@ function show(view) {
 // a run may go on while you look elsewhere; switching project waits for it
 // Projects: the hash may already be empty (no project open), then there is no hashchange to route on
 for (const b of document.querySelectorAll('nav.views button')) b.onclick = () => (b.dataset.view !== 'home' ? show(b.dataset.view) : location.hash ? (location.hash = '') : route());
+
+// closing the app window (or the tab) during a run stops the run: ask first
+window.addEventListener('beforeunload', e => { if (document.body.classList.contains('running')) e.preventDefault(); });
+
+/* ---------- guide editor: the document behind a run's PDF guide ---------- */
+let guideEdit = null; // { pdf, doc, dirty }
+const GUIDE_KINDS = { step: 'Step', section: 'Section heading', tip: 'Note', alert: 'Warning' };
+async function openGuideEditor(pdf) {
+  try { guideEdit = { pdf, doc: await api(`/guides/${encodeURIComponent(pdf)}/doc`), dirty: false }; }
+  catch (err) { toast(err.message); return; }
+  $('guideOpen').href = `/guides/${encodeURIComponent(pdf)}`;
+  renderGuideEditor();
+  show('guide');
+}
+function renderGuideEditor() {
+  const { doc, pdf } = guideEdit;
+  const root = $('guideDoc');
+  const changed = () => { guideEdit.dirty = true; };
+  const field = (tag, value, onInput, cls = '', attrs = {}) => {
+    const f = document.createElement(tag);
+    f.className = `field ${cls}`.trim(); f.value = value ?? '';
+    if (tag === 'textarea') { f.rows = Math.min(8, Math.max(2, String(value ?? '').split('\n').length + 1)); }
+    for (const [k, v] of Object.entries(attrs)) f.setAttribute(k, v);
+    f.oninput = () => { onInput(f.value); changed(); };
+    return f;
+  };
+  const addRow = at => {
+    const row = document.createElement('div'); row.className = 'gadd';
+    for (const [type, label] of [['section', '+ Section heading'], ['tip', '+ Note'], ['alert', '+ Warning']]) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'btn ghost small'; b.textContent = label;
+      b.onclick = () => { doc.blocks.splice(at, 0, type === 'section' ? { type, text: '', level: 1 } : { type, text: '' }); changed(); renderGuideEditor(); root.querySelectorAll('.gblock')[at + 1]?.querySelector('input, textarea')?.focus(); };
+      row.append(b);
+    }
+    return row;
+  };
+  const tools = i => {
+    const wrap = document.createElement('span');
+    for (const [label, act, dis] of [['↑', 'up', i === 0], ['↓', 'down', i === doc.blocks.length - 1], ['✕', 'del', false]]) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'icon-btn'; b.textContent = label; b.disabled = dis;
+      b.setAttribute('aria-label', { up: 'Move up', down: 'Move down', del: 'Delete' }[act]);
+      b.onclick = () => {
+        if (act === 'del' && doc.blocks[i].type === 'step' && !confirm('Delete this step and its screenshot from the guide?')) return;
+        if (act === 'del') doc.blocks.splice(i, 1);
+        else { const j = act === 'up' ? i - 1 : i + 1; [doc.blocks[i], doc.blocks[j]] = [doc.blocks[j], doc.blocks[i]]; }
+        changed(); renderGuideEditor();
+      };
+      wrap.append(b);
+    }
+    return wrap;
+  };
+  const head = document.createElement('div'); head.className = 'gblock';
+  const title = field('input', doc.title, v => { doc.title = v; }, 'g-title', { 'aria-label': 'Title', maxlength: '200' });
+  const desc = field('textarea', doc.description, v => { doc.description = v; }, '', { 'aria-label': 'Description', placeholder: 'Description under the title (optional): what this guide covers, who it is for' });
+  head.append(title, desc);
+  const parts = [head, addRow(0)];
+  let n = 0;
+  doc.blocks.forEach((b, i) => {
+    const card = document.createElement('div'); card.className = `gblock g-${b.type}`;
+    const h = document.createElement('div'); h.className = 'gblock-head';
+    if (b.type === 'step') { const num = document.createElement('span'); num.className = 'gnum'; num.textContent = ++n; h.append(num); }
+    const kind = document.createElement('span'); kind.className = 'kind'; kind.textContent = GUIDE_KINDS[b.type]; h.append(kind, tools(i));
+    card.append(h);
+    if (b.type === 'section') {
+      const lvl = document.createElement('select'); lvl.className = 'field small';
+      lvl.innerHTML = '<option value="1">Heading</option><option value="2">Sub-heading</option>'; lvl.value = String(b.level ?? 1);
+      lvl.onchange = () => { b.level = Number(lvl.value); changed(); };
+      card.append(field('input', b.text, v => { b.text = v; }, '', { 'aria-label': 'Section heading', placeholder: 'e.g. Upload data from Excel' }), lvl);
+    } else {
+      card.append(field('textarea', b.text, v => { b.text = v; }, '', { 'aria-label': GUIDE_KINDS[b.type], placeholder: b.type === 'step' ? 'What the reader does' : b.type === 'tip' ? 'Something useful to know here, e.g.\n- Dates in dd/mm/yyyy\n- Fields with a red header are required' : 'Something to watch out for' }));
+      if (b.type === 'step') {
+        card.append(field('textarea', b.detail, v => { b.detail = v; }, 'small', { 'aria-label': 'Detail', placeholder: 'Detail (optional): the value typed, what appears afterwards' }));
+        if (b.frame) { const img = document.createElement('img'); img.loading = 'lazy'; img.alt = ''; img.src = `/guides/${encodeURIComponent(pdf)}/${b.frame}`; card.append(img); }
+        card.append(guideImageTools(b));
+        card.addEventListener('paste', e => { // a screenshot pasted into the step replaces its image
+          const file = [...(e.clipboardData?.files ?? [])].find(f => /^image\/(png|jpeg)$/.test(f.type));
+          if (file) { e.preventDefault(); putGuideImage(b, file); }
+        });
+      }
+    }
+    parts.push(card, addRow(i + 1));
+  });
+  root.replaceChildren(...parts);
+}
+// Replace image / Add image / Remove image under a step (a file, or a screenshot pasted into the card)
+function guideImageTools(b) {
+  const row = document.createElement('div'); row.className = 'gimg-tools';
+  const pick = document.createElement('label'); pick.className = 'btn ghost small';
+  pick.textContent = b.frame ? 'Replace image' : 'Add image';
+  const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/png,image/jpeg'; input.className = 'visually-hidden';
+  input.onchange = () => { if (input.files[0]) putGuideImage(b, input.files[0]); };
+  pick.append(input);
+  row.append(pick);
+  if (b.frame) {
+    const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'link danger'; rm.textContent = 'Remove image';
+    rm.onclick = () => { delete b.frame; guideEdit.dirty = true; renderGuideEditor(); };
+    row.append(rm);
+  }
+  const hint = document.createElement('span'); hint.className = 'hint'; hint.textContent = 'or paste a screenshot here (Ctrl+V)';
+  row.append(hint);
+  return row;
+}
+async function putGuideImage(b, file) {
+  if (file.size > 10_000_000) { toast('The image is too large (at most 10 MB)'); return; }
+  const dataUrl = await new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsDataURL(file); });
+  try {
+    const { frame } = await api(`/guides/${encodeURIComponent(guideEdit.pdf)}/frame`, { method: 'POST', body: JSON.stringify({ dataUrl }) });
+    b.frame = frame; guideEdit.dirty = true;
+    renderGuideEditor();
+    toast('Image replaced: save to make the PDF again');
+  } catch (err) { toast(err.message); }
+}
+$('guideSave').onclick = async () => {
+  if (!guideEdit) return;
+  $('guideSave').disabled = true;
+  try {
+    await api(`/guides/${encodeURIComponent(guideEdit.pdf)}/doc`, { method: 'PUT', body: JSON.stringify({ doc: guideEdit.doc }) });
+    guideEdit.dirty = false;
+    $('guideOpen').href = `/guides/${encodeURIComponent(guideEdit.pdf)}?v=${Date.now()}`; // the browser's copy is old
+    toast('Guide saved: the PDF is made again');
+  } catch (err) { toast(err.message); }
+  finally { $('guideSave').disabled = false; }
+};
+$('guideBack').onclick = () => { if (guideEdit?.dirty && !confirm('Leave without saving your changes to the guide?')) return; show('run'); };
+
+/* ---------- first run: what this computer needs (Requirements) ---------- */
+const SETUP_PILL = { ok: ['pass', 'Ready'], warn: ['run', 'Optional'], bad: ['fail', 'Required'] };
+function renderSetup(setup) {
+  $('setupOs').textContent = setup.osName;
+  $('setupList').replaceChildren(...setup.items.map(i => {
+    const el = document.createElement('div');
+    el.className = 'setup-item';
+    const [cls, word] = SETUP_PILL[i.status];
+    el.innerHTML = `<span class="pill ${cls}">${word}</span><h3>${esc(i.label)}</h3><p class="detail">${esc(i.detail)}</p>`;
+    if (i.status !== 'ok' && (i.action || i.fix.length)) {
+      if (i.action === 'browsers') el.insertAdjacentHTML('beforeend', `<div class="actions"><button type="button" class="btn small" data-browsers>Download Chromium</button></div>`);
+      if (i.fix.length) {
+        const fix = document.createElement('div');
+        fix.className = 'fix';
+        fix.innerHTML = `<span class="hint">How to install on ${esc(setup.osName)}:</span>` + i.fix.map(f => (f.cmd
+          ? `${f.note ? `<span class="hint">${esc(f.note)}</span>` : ''}<div class="row"><code>${esc(f.cmd)}</code><button type="button" class="btn ghost small" data-copy="${esc(f.cmd)}">Copy</button></div>`
+          : `<span class="hint">${esc(f.note)}</span>`)).join('');
+        el.append(fix);
+      }
+    }
+    return el;
+  }));
+  const blocked = setup.items.some(i => i.status === 'bad');
+  $('setupContinue').disabled = blocked;
+  $('setupContinue').title = blocked ? 'Get the Required items ready first' : '';
+  for (const b of $('setupList').querySelectorAll('[data-copy]')) b.onclick = () => navigator.clipboard.writeText(b.dataset.copy).then(() => toast('Copied'), () => toast('Select the text and copy it'));
+  for (const b of $('setupList').querySelectorAll('[data-browsers]')) b.onclick = downloadBrowsers;
+}
+async function recheckSetup() { renderSetup(await api('/setup/status')); }
+function downloadBrowsers() {
+  for (const b of $('setupList').querySelectorAll('[data-browsers]')) { b.disabled = true; b.textContent = 'Downloading…'; }
+  const log = $('setupLog');
+  log.hidden = false; log.textContent = '';
+  const es = new EventSource('/setup/browsers');
+  es.addEventListener('log', e => {
+    const line = JSON.parse(e.data);
+    if (line.startsWith('↓') && /(^|\n)↓[^\n]*\n$/.test(log.textContent)) log.textContent = log.textContent.replace(/↓[^\n]*\n$/, ''); // one progress line
+    log.textContent += `${line}\n`; log.scrollTop = log.scrollHeight;
+  });
+  es.addEventListener('done', async e => {
+    es.close();
+    const { ok } = JSON.parse(e.data);
+    log.textContent += ok ? 'Done.\n' : 'The download failed: see the lines above.\n';
+    await recheckSetup();
+  });
+  es.onerror = async () => { if (es.readyState === EventSource.CLOSED) return; es.close(); log.textContent += 'The connection to the app was lost.\n'; await recheckSetup(); };
+}
+$('setupRecheck').onclick = () => recheckSetup().then(() => toast('Checked'), err => toast(err.message));
+$('setupContinue').onclick = () => { store.set({ setupSeen: true }); route(); };
+$('openSetup').onclick = async () => { try { renderSetup(await api('/setup/status')); show('setup'); } catch (err) { toast(err.message); } };
 
 /* ---------- live view ---------- */
 let live;
@@ -541,9 +826,24 @@ function renderResult(run, { live = false } = {}) {
     r.append(det);
   }
 
+  // what to do with the run's outputs: one row per kind (label, then its buttons in equal columns)
   const actions = document.createElement('div');
-  actions.className = 'actions';
-  actions.innerHTML = `<a class="btn ghost small" href="/report/${esc(run.id)}">Download HTML report</a>${run.video ? `<a class="btn ghost small" href="/recordings/${esc(run.video)}" download>Download video</a>` : ''}${run.guide ? `<a class="btn small" href="/guides/${esc(run.guide)}" target="_blank" rel="noopener">Open PDF guide</a>` : ''}`;
+  actions.className = 'result-actions';
+  const row = (label, ...els) => {
+    els = els.filter(Boolean);
+    if (!els.length) return;
+    const l = document.createElement('span'); l.className = 'ra-label'; l.textContent = label;
+    if (els.length === 1) els[0].classList.add('span2');
+    actions.append(l, ...els);
+  };
+  const link = (href, text, cls, attrs = {}) => { const a = Object.assign(document.createElement('a'), { href, textContent: text, className: `btn small ${cls}` }); for (const [k, v] of Object.entries(attrs)) a.setAttribute(k, v); return a; };
+  const button = (text, cls, onclick) => Object.assign(document.createElement('button'), { type: 'button', textContent: text, className: `btn small ${cls}`, onclick });
+  row('PDF guide',
+    run.guide && link(`/guides/${encodeURIComponent(run.guide)}`, 'Open PDF', '', { target: '_blank', rel: 'noopener' }),
+    run.guide && run.guideDoc && button('Edit', 'ghost', () => openGuideEditor(run.guide)));
+  row('Download',
+    link(`/report/${encodeURIComponent(run.id)}`, 'HTML report', 'ghost', { title: 'Download the HTML report' }),
+    run.video && link(`/recordings/${encodeURIComponent(run.video)}`, 'Video', 'ghost', { download: '', title: 'Download the video' }));
   r.append(actions);
 
   if (run.kind === 'fix' && run.script) {
@@ -555,17 +855,17 @@ function renderResult(run, { live = false } = {}) {
       await api(`/tests?project=${encodeURIComponent(run.project)}`, { method: 'POST', body: JSON.stringify({ name, runId: run.id, overwrite: true }) });
       save.textContent = `Saved to tests/${run.project}/${name}.spec.ts`; save.disabled = true;
     };
+    save.classList.add('span-all');
     actions.prepend(save);
   }
   if (run.script && run.kind !== 'fix') {
-    const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'btn ghost small'; copy.textContent = 'Copy script';
-    copy.onclick = () => navigator.clipboard.writeText(run.script).then(() => { copy.textContent = 'Script copied'; });
-    const view = document.createElement('button'); view.type = 'button'; view.className = 'btn ghost small'; view.textContent = 'Show script';
+    const copy = button('Copy', 'ghost', () => navigator.clipboard.writeText(run.script).then(() => { copy.textContent = 'Copied'; }));
     const pre = document.createElement('pre'); pre.className = 'code'; pre.hidden = true; pre.textContent = run.script;
-    view.onclick = () => { pre.hidden = !pre.hidden; view.textContent = pre.hidden ? 'Show script' : 'Hide script'; };
-    actions.append(copy, view);
+    const view = button('Show', 'ghost', () => { pre.hidden = !pre.hidden; view.textContent = pre.hidden ? 'Show' : 'Hide'; });
+    copy.title = 'Copy the Playwright script'; view.title = 'Show the Playwright script';
+    row('Script', copy, view);
     r.append(pre);
-    r.append(inlineForm('Save as test', 'test-name, e.g. login-and-checkout', slugify((run.task ?? '').split('\n')[0]).slice(0, 40), async name => {
+    r.append(inlineForm('Save as test', 'test-name, e.g. login-and-checkout', slugify(run.title || (run.task ?? '').split('\n')[0]).slice(0, 40), async name => {
       const { name: saved } = await api(withProject('/tests'), { method: 'POST', body: JSON.stringify({ name, runId: run.id }) });
       return `Saved as tests/${project.id}/${saved}.spec.ts. Replay it from the Saved tests tab.`;
     }));
@@ -606,9 +906,9 @@ function fixTest(runId, name) {
 /* ---------- AI form ---------- */
 $('f').onsubmit = e => {
   e.preventDefault();
-  const params = { url: $('url').value, task: $('task').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value, record: $('record').checked ? '1' : '', guide: $('guide').checked ? '1' : '', flow: attachedFlow ?? '', env: $('aiEnv').value, expected: $('expected').value.trim() };
+  const params = { url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value, record: $('record').checked ? '1' : '', guide: $('guide').checked ? '1' : '', flow: attachedFlow ?? '', env: $('aiEnv').value, expected: $('expected').value.trim() };
   store.set({ provider: params.provider, model: params.model, record: $('record').checked, guide: $('guide').checked, aiSession: params.session });
-  storeProject({ url: params.url, task: params.task, expected: params.expected, aiEnv: params.env });
+  storeProject({ url: params.url, title: params.title, task: params.task, expected: params.expected, aiEnv: params.env });
   origin = 'ai';
   openRunPage({ kind: 'ai', task: params.task, who: `${$('provider').selectedOptions[0]?.textContent ?? ''}${params.model ? ` (${params.model})` : ''}${params.session ? `, session ${params.session}` : ''}` });
   start('ai', params);
@@ -709,14 +1009,14 @@ async function loadHistory() {
 function renderHistory() {
   const q = $('histSearch').value.trim().toLowerCase();
   const runs = historyRuns.filter(r => (historyFilter === 'all' || (historyFilter === 'pass' ? r.status === 'pass' : r.status !== 'pass'))
-    && (!q || `${r.task} ${r.provider ?? ''}`.toLowerCase().includes(q)));
+    && (!q || `${r.title ?? ''} ${r.task} ${r.provider ?? ''}`.toLowerCase().includes(q)));
   if (!historyRuns.length) { $('historyList').innerHTML = `<div class="emptybox"><strong>No history yet</strong>Every AI run, replay and workflow is recorded here, with its video and report.</div>`; return; }
   if (!runs.length) { $('historyList').innerHTML = `<div class="emptybox"><strong>No runs match</strong>Change the search or the filter.</div>`; return; }
   $('historyList').innerHTML = `<div class="list">${runs.map(r => {
     const [ic, kind] = KIND[r.kind] ?? KIND.replay;
     return `<button type="button" class="item" data-id="${esc(r.id)}">
       <span class="kind ${esc(r.status)}" title="${esc(STATUS[r.status] ?? r.status)}">${icon(ic)}</span>
-      <span><span class="title" style="display:block">${esc((r.task ?? '').split('\n')[0].slice(0, 140))}</span>
+      <span><span class="title" style="display:block">${esc((r.title || (r.task ?? '').split('\n')[0]).slice(0, 140))}</span>
         <span class="sub" style="display:block">${esc(kind === 'Replay' && r.testNames?.length > 1 ? 'Suite' : kind)}, ${esc(ago(r.started))}, ${r.secs ?? 0} s${r.schedule ? ', scheduled' : ''}${r.provider ? `, ${esc(r.provider)}` : ''}</span></span>
       <span class="tags"><span class="tag ${esc(r.status)}">${esc(STATUS[r.status] ?? r.status)}</span>${r.issueCount ? `<span class="tag fail">${r.issueCount} app error${r.issueCount > 1 ? 's' : ''}</span>` : ''}${r.a11yCount ? `<span class="tag">♿ ${r.a11yCount}</span>` : ''}</span>
     </button>`;
@@ -740,7 +1040,7 @@ $('historyList').onclick = async e => {
     : run.kind === 'fix'
     ? { kind: 'fix', params: { run: run.fixOf, test: run.testNames?.[0] ?? '', provider: settings.providers?.find(p => p.label === run.provider)?.id ?? '', model: run.model ?? '' } }
     : run.kind === 'ai'
-    ? { kind: 'ai', params: { url: run.url, task: run.task, provider: settings.providers?.find(p => p.label === run.provider)?.id ?? '', model: run.model ?? '', session: run.session ?? '', record: run.video ? '1' : '', guide: run.guide ? '1' : '', flow: run.flow ?? '', env: run.env ?? '', expected: run.expected ?? '' } }
+    ? { kind: 'ai', params: { url: run.url, title: run.title ?? '', task: run.task, provider: settings.providers?.find(p => p.label === run.provider)?.id ?? '', model: run.model ?? '', session: run.session ?? '', record: run.video ? '1' : '', guide: run.guide ? '1' : '', flow: run.flow ?? '', env: run.env ?? '', expected: run.expected ?? '' } }
     : { kind: 'replay', params: { tests: (run.testNames ?? []).join(','), session: run.session ?? '', record: run.video ? '1' : '', guide: run.guide ? '1' : '', env: run.env ?? '', repeat: String(run.times ?? 1) } };
   if (run.kind === 'workflow') for (const b of run.blocks ?? []) { // each block: its heading, the AI's steps, its result
     addPlainStep({ section: blockTitle(b) });

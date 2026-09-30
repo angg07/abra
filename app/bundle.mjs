@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
-export const BUNDLE_FORMAT = 'ai-browser-runner-project';
+export const BUNDLE_FORMAT = 'ai-browser-runner-project'; // the app's old name: kept so files exported by 1.0.x still import
 export const BUNDLE_VERSION = 1;
 const PROJECT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/; // same rule as app/library.mjs
 const RESERVED = new Set(['support', 'data']); // tests/support holds every project's helpers: never a project
@@ -14,6 +14,7 @@ const ALLOWED = [
   { re: new RegExp(`^data/${SEG}\\.csv$`), kind: 'text' },
   { re: new RegExp(`^workflows/${SEG}\\.json$`), kind: 'text' },
   { re: new RegExp(`^${SEG}\\.spec\\.ts-snapshots/${SEG}\\.png$`), kind: 'base64' },
+  { re: /^logo\.(png|jpg)$/, kind: 'base64' }, // the project's logo (title card, PDF cover)
 ];
 const kindOf = path => (path.includes('..') ? undefined : ALLOWED.find(a => a.re.test(path))?.kind);
 
@@ -32,7 +33,7 @@ export function packProject(dir, project, secretNames) {
 }
 
 export function unpackBundle(b) {
-  if (!b || typeof b !== 'object' || b.format !== BUNDLE_FORMAT) throw new Error('This is not an AI Browser Runner project file');
+  if (!b || typeof b !== 'object' || b.format !== BUNDLE_FORMAT) throw new Error('This is not an ABRA project file');
   if (b.version !== BUNDLE_VERSION) throw new Error(`This project file is version ${b.version}; this app reads version ${BUNDLE_VERSION}. Update the app.`);
   const project = b.project;
   if (!project || typeof project !== 'object' || !PROJECT_ID.test(String(project.id ?? ''))) throw new Error('The file has no valid project id');
@@ -40,6 +41,7 @@ export function unpackBundle(b) {
   // same rules as the project form (library.mjs saveProject), so the Projects page can always list it
   if (typeof project.name !== 'string' || !project.name.trim() || project.name.trim().length > 60) throw new Error('The project name must be 1 to 60 characters');
   if (project.description !== undefined && (typeof project.description !== 'string' || project.description.length > 300)) throw new Error('The project description must be text of at most 300 characters');
+  if (project.app !== undefined && (typeof project.app !== 'string' || project.app.length > 60)) throw new Error('The application name must be text of at most 60 characters');
   if (project.url && (typeof project.url !== 'string' || !/^(https?:\/\/|\{\{)\S+$/.test(project.url))) throw new Error('The project start URL must start with http(s):// or {{');
   const secrets = Array.isArray(b.secrets) ? b.secrets.filter(n => /^[A-Z][A-Z0-9_]{0,59}$/.test(n)) : [];
   if (!b.files || typeof b.files !== 'object') throw new Error('The file lists no files');
@@ -52,6 +54,24 @@ export function unpackBundle(b) {
     return { path, data: kind === 'base64' ? Buffer.from(entry.base64, 'base64') : Buffer.from(entry.text, 'utf8') };
   });
   return { project, secrets, files };
+}
+
+// Every project on this computer in one file: the per-project bundles above, in a list
+export const ALL_FORMAT = 'ai-browser-runner-projects';
+export const packAll = bundles => ({ format: ALL_FORMAT, version: BUNDLE_VERSION, exported: new Date().toISOString(), projects: bundles });
+export const isAll = b => b?.format === ALL_FORMAT;
+// Every project in the file must pass unpackBundle, and no id twice, before anything is written
+export function unpackAll(b) {
+  if (!isAll(b)) throw new Error('This is not an ABRA projects file');
+  if (b.version !== BUNDLE_VERSION) throw new Error(`This projects file is version ${b.version}; this app reads version ${BUNDLE_VERSION}. Update the app.`);
+  if (!Array.isArray(b.projects) || !b.projects.length) throw new Error('The file holds no projects');
+  if (b.projects.length > 200) throw new Error('The file holds more than 200 projects');
+  const parts = b.projects.map((p, i) => {
+    try { return unpackBundle(p); } catch (e) { throw new Error(`Project ${i + 1} (${typeof p?.project?.name === 'string' ? p.project.name : 'no name'}): ${e.message}`); }
+  });
+  const seen = new Set();
+  for (const { project } of parts) { if (seen.has(project.id)) throw new Error(`Project "${project.id}" is in the file twice`); seen.add(project.id); }
+  return parts;
 }
 
 // {{name}} values the imported files use that no environment on this laptop defines. Built-ins (vars-core)

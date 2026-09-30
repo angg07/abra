@@ -48,6 +48,8 @@ const RULES = [
   [/^Check (.+)$/, m => `Centang ${targetId(m[1])}`],
   [/^Drag (.+) to (.+)$/, m => `Seret ${targetId(m[1])} ke ${targetId(m[2])}`],
   [/^Press (.+)$/, m => `Tekan tombol ${m[1]}`],
+  [/^Tap (.+)$/, m => `Ketuk ${targetId(m[1])}`],
+  [/^Read (.+)$/, m => `Baca ${m[1]}`],
 ];
 
 export function translateStep(text, lang) {
@@ -63,14 +65,14 @@ const LABELS = {
     resultTitle: 'Result', errorsTitle: 'Errors during the run', errorsIntro: 'The application reported these while the steps ran:',
     noSteps: 'No steps were recorded.', page: 'Page', of: 'of', met: 'met', notMet: 'NOT met', unconfirmed: 'not confirmed',
     status: { pass: 'Passed', fail: 'Failed', stopped: 'Stopped', error: 'Error' }, locale: 'en-US', testRun: 'Test run',
-    suite: 'Test suite',
+    suite: 'Test suite', alert: 'Attention!',
   },
   id: {
     kicker: 'Panduan langkah demi langkah', website: 'Situs', date: 'Tanggal', result: 'Hasil', steps: 'Langkah', expected: 'Harapan',
     resultTitle: 'Hasil', errorsTitle: 'Error selama proses', errorsIntro: 'Aplikasi melaporkan hal berikut selama langkah-langkah berjalan:',
     noSteps: 'Tidak ada langkah yang terekam.', page: 'Halaman', of: 'dari', met: 'terpenuhi', notMet: 'TIDAK terpenuhi', unconfirmed: 'belum dipastikan',
     status: { pass: 'Berhasil', fail: 'Gagal', stopped: 'Dihentikan', error: 'Error' }, locale: 'id-ID', testRun: 'Pengujian',
-    suite: 'Rangkaian pengujian',
+    suite: 'Rangkaian pengujian', alert: 'Perhatian!',
   },
 };
 export const guideLabels = lang => LABELS[lang] ?? LABELS.en;

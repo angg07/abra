@@ -10,7 +10,8 @@
     "ui": "playwright test --ui",
     "app": "node app/server.mjs",
     "setup": "node app/setup.mjs",
-    "test:app": "node --test --test-concurrency=1 app/test/*.test.mjs"
+    "test:app": "node --test --test-concurrency=1 app/test/*.test.mjs",
+    "package": "node app/package.mjs"
   },
   "keywords": [],
   "author": "",

@@ -1,4 +1,6 @@
-# AI Browser Runner
+# ABRA
+
+**A**I **B**rowser **R**unner & **A**utomator. *Abrakadabra: your app tests itself.*
 
 A local web app for end-to-end testing of web applications with Playwright. Describe a flow in plain
 language and an AI drives a real browser, or replay saved Playwright tests without AI. You watch it live,
@@ -6,17 +8,72 @@ and every run can produce a video, a step-by-step PDF guide and an HTML report.
 
 ## Install
 
-AI Browser Runner runs on your own computer (Windows, macOS or Linux). You need:
+ABRA runs on your own computer (Windows, macOS or Linux) and opens in your browser at
+http://127.0.0.1:4321 (it listens on this computer only).
 
-- **Node.js 22.13 or newer**: Windows `winget install OpenJS.NodeJS.LTS`, macOS `brew install node`, Linux https://nodejs.org or your package manager.
-- **ffmpeg** (for videos; everything else works without it): Windows `winget install ffmpeg`, macOS `brew install ffmpeg`, Linux `sudo apt install ffmpeg`.
-- **An AI engine**: [Claude Code](https://claude.com/claude-code) signed in with your subscription, or an API key added later in Settings → AI.
+### Portable build (no Node.js needed)
 
-Then, in the app's folder:
+Unpack `abra-linux-x64.tar.gz` or `abra-win-x64.zip`, then run `start.sh` (Linux) or
+double-click `start.cmd` (Windows). The app opens in its own window: an installed Edge, Chrome or Chromium (else the
+Chromium the app downloaded) in app mode, without tabs or address bar and with its own profile; closing the window
+stops the app. The launcher starts the app in the background and returns, so no terminal or console window
+stays open (output: `app/data/app.log`). Until Chromium is there (the very first start on Linux or macOS) it opens in the browser. On the first start the **Before you start**
+screen checks the computer, downloads Chromium with one click and shows how to install what is still missing
+on that OS (also under **Requirements** in the sidebar, and in `INSTALL.txt`). Projects, history and videos are
+saved inside the unpacked folder.
+
+Build them from this repository with `npm run package -- linux` or `npm run package -- win` (into `dist/`;
+only files in git go in, never `.env`, run history or your projects' tests).
+
+### Desktop app (Electron)
+
+Installers with the app in its own window, a menu entry and an icon:
+
+| OS | File | Install |
+|---|---|---|
+| Linux | `ABRA-<version>-linux-x86_64.AppImage` or `…-linux-amd64.deb` | AppImage: make it executable and run it. deb: `sudo apt install ./ABRA-…deb` |
+| Windows | `ABRA-<version>-win-x64.exe` | run the installer (for this user, no admin rights needed) |
+| macOS | `ABRA-<version>-mac-arm64.dmg` (Apple Silicon) or `…-mac-x64.dmg` (Intel) | open the dmg, drag the app to Applications |
+
+The files are not signed yet: Windows SmartScreen says "Windows protected your PC" (More info, then Run anyway);
+macOS (the app is signed ad hoc, not by an Apple developer) says it "cannot be opened": System Settings ›
+Privacy & Security › **Open Anyway**, or run `xattr -cr "/Applications/ABRA.app"` once. A 1.0.0 dmg
+that says "is damaged" on Apple Silicon was built without that signature: sign it on the Mac with
+`codesign --force --deep --sign - "/Applications/ABRA.app"`, then the `xattr` command, or use a newer release.
+
+Updates: the app looks for a new release of github.com/angg07/abra when it starts and every 6 hours. Windows
+and Linux download it in the background and install it when you close the app (or at once: **Restart now**).
+macOS only says a new version is out, since installing it needs an app signed by an Apple developer.
+Versions before 1.1.0 have no updater: install 1.1.0 once by hand.
+
+The window is Electron; the app itself runs on the Node inside the installer, as in the portable build. Its code
+is copied to the user's data folder on the first start and after an update, and that is where projects,
+history, videos, settings and `.env` live: `~/.config/ABRA/app` (Linux),
+`%APPDATA%\ABRA\app` (Windows), `~/Library/Application Support/ABRA/app` (macOS).
+An update replaces the code, never those. Versions up to 1.0.x were called AI Browser Runner: the first start of
+ABRA moves that data folder (`…/AI Browser Runner/app`) to the new one. The first start shows **Before you start** (Chromium, AI engine,
+ffmpeg), like the portable build.
+
+Build: `cd desktop && npm install && npm run dist -- linux` (or `win`; Windows builds on Linux need `wine`).
+macOS builds only on a Mac: the **Desktop app** workflow in GitHub Actions builds all three (run it by hand, or
+push a tag like `v1.0.0` to also attach the files to a release). Output: `dist/desktop/`.
+
+### What each OS needs before the first use
+
+| | Linux | Windows | macOS |
+|---|---|---|---|
+| **Node.js 22.13+** (not for the portable build) | https://nodejs.org or `sudo apt install nodejs` | `winget install OpenJS.NodeJS.LTS` | `brew install node` |
+| **Chromium** (required) | the app downloads it (~650 MB, once); if it will not start: `sudo npx playwright install-deps chromium` | the app downloads it | the app downloads it |
+| **AI engine** (required): Claude Code, or an API key in Settings › AI | `curl -fsSL https://claude.ai/install.sh \| bash`, then `claude` once to sign in | PowerShell: `irm https://claude.ai/install.ps1 \| iex`, then `claude` | `curl -fsSL https://claude.ai/install.sh \| bash`, then `claude` |
+| **ffmpeg** with libx264 (optional: videos) | `sudo apt install ffmpeg` / `sudo dnf install ffmpeg` / `sudo pacman -S ffmpeg` | `winget install Gyan.FFmpeg`, then reopen the app | `brew install ffmpeg` |
+
+### From source
+
+In the app's folder:
 
 ```bash
 npm install
-npm run setup   # checks the above and installs the browsers
+npm run setup   # checks the above and downloads Chromium
 npm run app     # http://127.0.0.1:4321
 ```
 
@@ -30,9 +87,20 @@ SECRET_ADMIN_PASS=...                 # a secret, used as {{ADMIN_PASS}}
 ### Share a project
 
 In a project, **Edit → Export project** saves `<project>.abr.json`. On another computer, **Projects → Import**
-reads it. Secrets, database passwords, login sessions and run history are never in the file: after importing,
+reads it. Secrets, database passwords, the codebase folder, login sessions and run history are never in the file: after importing,
 the app lists the secrets and environment values to add. Test files are code that runs on your computer:
 import only files from people you trust.
+
+To move everything at once, **Projects → Export all** saves every project in one JSON file
+(`abra-projects-<date>.abr.json`); **Import** reads it too. Every project in it is checked before
+anything is written; projects that already exist are skipped, imported as new copies or overwritten, as you choose.
+
+### Let the AI read the application's code (optional)
+
+**Projects › Edit › Source code › Codebase folders**: the full path of the application's source on this computer, one per line (e.g. the frontend and the backend when they live in separate folders); **Choose folder…** browses to one and adds it.
+With the Claude Code engine, AI runs, test repairs and workflow blocks may read it (Read, Grep, Glob only; no
+edits, no shell) to find page addresses, form rules and element ids. `.env*`, keys (`*.pem`, `*.key`, SSH keys),
+`.npmrc`, `auth.json` and `.git/` stay closed. Pass or fail is still judged from the screen. Other engines ignore it.
 
 ### Checking a Windows install
 
@@ -156,6 +224,15 @@ result goes to Telegram (message + HTML report; secret `TELEGRAM_TOKEN` + chat i
 cover. In Indonesian the step sentences are translated by pattern ("Klik tombol “Login”", "Isi kolom
 “Username”"), dates and labels follow; the AI's notes (always English) are left out.
 
+### Editing a PDF guide
+
+A run's PDF guide can be edited before it goes out: open the run (History), then **Edit guide**. Change the title,
+add a description, rewrite or delete steps, move them, replace a step's screenshot (**Replace image**, or paste one
+with Ctrl+V into the step) or remove it, and add **section headings**, **notes** (green) and
+**warnings** (red) between them; **Save and make PDF** writes the PDF again. In text, `**bold**`, lines starting
+with `- ` become bullets and web addresses become links. The guide's document and screenshots are kept next to
+the PDF (`app/guides/<name>/`); guides made before this feature cannot be edited (run again).
+
 ### Visual checks
 
 In **Edit**, **Insert visual check** adds `await expect(page).toHaveScreenshot(...)` (Playwright's own visual
@@ -205,7 +282,7 @@ tests/support/       helpers shared by all tests (fill() values, dbQuery)
 
 Local only, git-ignored: `tests/<project>/` (your projects hold app addresses and data: to version them,
 keep them in your own private repo or remove `tests/*` from `.gitignore` in a private fork), `.env`, `app/data/` (`app.db` with accounts and history, login sessions with cookies), `app/recordings/`,
-`app/guides/`. Only the newest videos and PDF guides are kept (**Settings > Recording**, default 50).
+`app/guides/`. A video opens with a 3-second title card: the project's logo and application name (Projects › Edit › Branding; without a logo the one from Settings › PDF guides) and the run's title. A caption bar at the bottom names each step as it happens (number + action, in the PDF guide's language, at most 10 words, no full stop). A step inside a form or modal zooms in on it for up to 4 seconds (up to 2x; full pages are not zoomed). Waits of more than 5 seconds between steps play at 4x with a "4x" badge after the first 2 seconds; the part after the last step plays as recorded. Only the newest videos and PDF guides are kept (**Settings > Recording**, default 50).
 
 ## Security notes
 

@@ -7,12 +7,18 @@ import { join } from 'node:path';
 import { startApp } from './helpers/app-server.mjs';
 
 let app, browser;
+// a computer that already went through the first-run screen (Requirements)
+async function openPage() {
+  const page = await browser.newPage();
+  await page.addInitScript(() => { const v = JSON.parse(localStorage.getItem('last') || '{}'); v.setupSeen = true; localStorage.setItem('last', JSON.stringify(v)); });
+  return page;
+}
 after(async () => { await browser?.close(); if (app) rmSync(join(app.root, 'tests', 'zz-ui-import'), { recursive: true, force: true }); app?.stop(); });
 
 test('the page opens on Projects without signing in', async () => {
   app = await startApp({ port: 4396 });
   browser = await chromium.launch();
-  const page = await browser.newPage();
+  const page = await openPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   await page.goto(app.base);
@@ -24,8 +30,24 @@ test('the page opens on Projects without signing in', async () => {
   assert.deepEqual(errors, []);
 });
 
+test('the first start on a computer shows Requirements; Continue goes on to Projects and is remembered', async () => {
+  const page = await browser.newPage(); // nothing stored yet
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto(app.base);
+  await page.locator('#view-setup .setup-item').first().waitFor({ timeout: 10000 });
+  assert.match(await page.locator('#view-setup').textContent(), /Chromium/);
+  if (await page.locator('#setupContinue').isEnabled()) { // this computer has everything required
+    await page.locator('#setupContinue').click();
+    await page.locator('#newProject').waitFor({ state: 'visible' });
+    await page.reload();
+    await page.locator('#newProject').waitFor({ state: 'visible' });
+  }
+  assert.deepEqual(errors, []);
+});
+
 test('Import reads a project file and opens the imported project', async () => {
-  const page = await browser.newPage();
+  const page = await openPage();
   page.on('dialog', d => d.accept()); // the file list confirmation
   await page.goto(app.base);
   await page.locator('#importProject').waitFor();
@@ -42,7 +64,7 @@ test('Settings: a change shows the save bar and marks its tab; Discard reverts; 
   const { readFileSync, writeFileSync } = await import('node:fs');
   const files = ['settings.json', 'providers.json'].map(f => join(app.root, 'app', f));
   const saved = files.map(f => readFileSync(f)); // Save writes the real files: put them back afterwards
-  const page = await browser.newPage();
+  const page = await openPage();
   try {
     await page.goto(app.base);
     await page.locator('.openSettings').click();
