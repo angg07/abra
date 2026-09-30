@@ -32,7 +32,7 @@ function installCode() {
   if (fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8') === want) return;
   fs.mkdirSync(home, { recursive: true });
   fs.cpSync(payload, home, {
-    recursive: true, force: true,
+    recursive: true, force: true, verbatimSymlinks: true, // keep node_modules/.bin links relative: absolute ones point into the installer (and macOS refuses them)
     filter: src => { const rel = path.relative(payload, src); return !rel || !KEEP.some(re => re.test(rel)) || !fs.existsSync(path.join(home, rel)); },
   });
 }

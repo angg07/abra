@@ -106,7 +106,8 @@ export function stageApp(out) {
   if (!existsSync(join(root, 'node_modules'))) throw new Error('Run npm install first');
   // ponytail: node_modules is copied as it is here; it is plain JavaScript (no native addons), so it runs on
   // any OS. Switch to a clean `npm ci` in the build folder if a native dependency is ever added.
-  cpSync(join(root, 'node_modules'), join(out, 'node_modules'), { recursive: true, filter: src => !/[\\/]\.cache([\\/]|$)/.test(src) });
+  // verbatimSymlinks: node_modules/.bin links stay relative; resolved, they point at this computer and macOS refuses the app
+  cpSync(join(root, 'node_modules'), join(out, 'node_modules'), { recursive: true, verbatimSymlinks: true, filter: src => !/[\\/]\.cache([\\/]|$)/.test(src) });
   return files.length;
 }
 
