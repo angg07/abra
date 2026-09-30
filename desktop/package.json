@@ -1,7 +1,8 @@
 {
   "name": "abra",
   "productName": "ABRA",
-  "version": "1.1.1",
+  "desktopName": "abra.desktop",
+  "version": "1.1.2",
   "description": "Describe a task, an AI drives a real browser and writes a replayable Playwright test.",
   "author": "angg07 <20508936+angg07@users.noreply.github.com>",
   "license": "MIT",
@@ -45,8 +46,9 @@
         "deb"
       ],
       "category": "Development",
-      "icon": "build/icon.png",
-      "executableName": "abra"
+      "icon": "build/icons",
+      "executableName": "abra",
+      "syncDesktopName": true
     },
     "deb": {
       "depends": [
