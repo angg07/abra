@@ -24,6 +24,8 @@ import { ciWorkflow } from './ci.mjs';
 import { recordFlow, stopRecording, isRecording, flowScript, flowStorage } from './recorder.mjs';
 import { splitAnswer, flakyOf, expectedVerdict, isAppError } from './shared.mjs';
 import { checkRequirements, installBrowsers, OS_NAMES } from './setup.mjs';
+import { issueUrl } from './issue.mjs';
+import { release as osRelease } from 'node:os';
 import { spawn } from 'node:child_process';
 import { aiStep, replayStep, guideCollector, buildGuidePdf, secretMasker, runTitle, entersValue, guideFolder, readGuideDoc, cleanGuideDoc, renderGuidePdf, FRAME_FILE, frameType, guideFrames, addGuideFrame, pruneGuideFrames } from './guide.mjs';
 import { finishVideo } from './video.mjs';
@@ -870,6 +872,12 @@ async function route(req, res) {
     return json(res, { id });
   }
   /* ----- first run: what this computer still needs ----- */
+  if (p === '/report' && m === 'GET') { // "Report a problem": a filled-in GitHub issue, secrets taken out (app/issue.mjs)
+    let log = ''; try { log = readFileSync(logPath, 'utf8').slice(-30_000); } catch {}
+    const version = process.env.ABR_VERSION || JSON.parse(readFileSync(join(dir, '..', 'package.json'), 'utf8')).version;
+    const mode = process.env.ABR_DESKTOP ? 'desktop app' : process.env.ABR_PORTABLE ? 'portable' : 'from source';
+    return json(res, { url: issueUrl({ version, os: `${OS_NAMES[process.platform] ?? process.platform} ${osRelease()} ${process.arch}`, mode, log }) });
+  }
   if (p === '/setup/status' && m === 'GET') return json(res, { os: process.platform, osName: OS_NAMES[process.platform] ?? process.platform, portable: Boolean(process.env.ABR_PORTABLE), items: await checkRequirements({ root: join(dir, '..') }) });
   if (p === '/setup/browsers' && m === 'GET') { // download Chromium, the installer's lines streamed
     if (browsersInstalling) throw new Error('Chromium is already being downloaded');

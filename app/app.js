@@ -593,6 +593,7 @@ function downloadBrowsers() {
 }
 $('setupRecheck').onclick = () => recheckSetup().then(() => toast('Checked'), err => toast(err.message));
 $('setupContinue').onclick = () => { store.set({ setupSeen: true }); route(); };
+$('reportProblem').onclick = async () => { try { window.open((await api('/report')).url, '_blank', 'noopener'); } catch (err) { toast(err.message); } };
 $('openSetup').onclick = async () => { try { renderSetup(await api('/setup/status')); show('setup'); } catch (err) { toast(err.message); } };
 
 /* ---------- live view ---------- */

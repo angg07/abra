@@ -66,7 +66,7 @@ async function startServer() {
   if (!fs.existsSync(path.join(home, '.env'))) fs.writeFileSync(path.join(home, '.env'), '# API keys and secrets, written by the app (Settings). Keep this file private.\n');
   server = spawn(nodeBin, [path.join(home, 'app', 'server.mjs')], {
     cwd: home, windowsHide: true, stdio: ['ignore', log, log],
-    env: { ...process.env, PORT: String(port), ABR_PORTABLE: '1', ABR_DESKTOP: '1' },
+    env: { ...process.env, PORT: String(port), ABR_PORTABLE: '1', ABR_DESKTOP: '1', ABR_VERSION: app.getVersion() },
   });
   const exited = new Promise(resolve => server.on('exit', code => resolve(code ?? 1)));
   server.on('error', e => showError('The app could not start', e.message));
