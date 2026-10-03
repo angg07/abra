@@ -17,6 +17,17 @@ test('AI answer splits into evidence and script', () => {
   assert.equal(script, 'test(1)\n');
 });
 
+test('the test is found after other code blocks (a mermaid diagram first)', () => {
+  const answer = 'RESULT: SUCCESS\n\n```mermaid\nstateDiagram-v2\n  A --> B\n```\n\n### Playwright test\n\n```ts\nimport { test } from \'@playwright/test\';\ntest(1)\n```\n\n```json\n{"a":1}\n```';
+  const { evidence, script } = splitAnswer(answer);
+  assert.equal(script, 'import { test } from \'@playwright/test\';\ntest(1)\n');
+  assert.equal(evidence, '### Playwright test');
+});
+
+test('no test in the answer: no script', () => {
+  assert.equal(splitAnswer('RESULT: FAILED\n\n```mermaid\nA --> B\n```\n\nBlocked.').script, null);
+});
+
 test('diff: removed lines before added, counts right', () => {
   const d = lineDiff('a\nold\nc', 'a\nnew\nc');
   assert.equal(d.added, 1);
@@ -47,4 +58,41 @@ test('findings are split: app errors, third-party, accessibility', async () => {
   const { isAppError, isThirdParty, isA11y } = await import('../shared.mjs');
   const list = [{ kind: 'http', thirdParty: false }, { kind: 'http', thirdParty: true }, { kind: 'a11y', thirdParty: false }];
   assert.deepEqual(list.map(i => [isAppError(i), isThirdParty(i), isA11y(i)]), [[true, false, false], [false, true, false], [false, false, true]]);
+});
+
+test('the code a browser action ran is read from a Playwright MCP result', async () => {
+  const { ranCode } = await import('../shared.mjs');
+  const result = "### Ran Playwright code\n```js\nawait page.getByRole('button', { name: 'Save' }).click();\n```\n### Page\n- Page URL: http://myapp.test/";
+  assert.equal(ranCode(result), "await page.getByRole('button', { name: 'Save' }).click();");
+  assert.equal(ranCode('### Snapshot\n- button "Save"'), null);
+});
+
+test('without a test in the answer, one is built from the code the browser ran', async () => {
+  const { scriptFromCode, splitAnswer } = await import('../shared.mjs');
+  const s = scriptFromCode("Polis 'Marine' Hull", ["await page.goto('http://myapp.test/');", "await page.getByLabel('Name').fill('Budi');\nawait page.keyboard.press('Enter');"]);
+  assert.equal(s, `import { test, expect } from '@playwright/test';
+
+test('Polis \\'Marine\\' Hull', async ({ page }) => {
+  await page.goto('http://myapp.test/');
+  await page.getByLabel('Name').fill('Budi');
+  await page.keyboard.press('Enter');
+});
+`);
+  assert.equal(splitAnswer('RESULT: SUCCESS\n\n```ts\n' + s + '```').script, s); // the same shape as one the AI writes
+});
+
+test('an upload step in the browser code becomes a file chooser block the test can run', async () => {
+  const { scriptFromCode } = await import('../shared.mjs');
+  const s = scriptFromCode('Upload', ["await page.locator('#f').click();", 'await fileChooser.setFiles(["{{file.a.xlsx}}"])', "await page.getByRole('button', { name: 'Save' }).click();"]);
+  assert.equal(s, `import { test, expect } from '@playwright/test';
+
+test('Upload', async ({ page }) => {
+  {
+    const fileChooser = page.waitForEvent('filechooser');
+    await page.locator('#f').click();
+    await (await fileChooser).setFiles(["{{file.a.xlsx}}"]);
+  }
+  await page.getByRole('button', { name: 'Save' }).click();
+});
+`);
 });

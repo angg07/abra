@@ -17,6 +17,16 @@ const api = async (path, opts = {}) => {
   if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`);
   return r.status === 204 ? null : (r.headers.get('content-type') ?? '').includes('json') ? r.json() : r.text();
 };
+// a file as the request body itself (the server's readRaw); answers JSON
+const sendFile = (path, file) => fetch(path, { method: 'POST', body: file, headers: { 'content-type': 'application/octet-stream' } })
+  .then(async r => { if (!r.ok) throw new Error(await r.text() || `HTTP ${r.status}`); return r.json(); });
+const fmtSize = n => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+// one row per file: its {{file.X}} value (click to copy), size, Delete
+function renderFiles(list, files, onDelete) {
+  list.innerHTML = files.map(f => `<li><code title="Click to copy">{{file.${esc(f.name)}}}</code><span class="muted">${f.size !== undefined ? fmtSize(f.size) : ''}</span><button type="button" class="link danger" data-name="${esc(f.name)}" aria-label="Delete ${esc(f.name)}">Delete</button></li>`).join('');
+  for (const c of list.querySelectorAll('code')) c.onclick = () => navigator.clipboard.writeText(c.textContent).then(() => toast(`Copied ${c.textContent}`));
+  for (const b of list.querySelectorAll('button')) b.onclick = () => onDelete(b.dataset.name);
+}
 const ago = t => {
   const s = Math.round((Date.now() - t) / 1000);
   if (s < 60) return 'just now'; if (s < 3600) return `${Math.floor(s / 60)} min ago`;
@@ -52,6 +62,7 @@ async function boot() {
 
 /* ---------- projects: start screen, then one project at a time (#/p/<id>) ---------- */
 let project = null, projects = [];
+let shownViews = 0; // counts show() calls, so a late default page never replaces one the user picked
 const withProject = path => `${path}${path.includes('?') ? '&' : '?'}project=${encodeURIComponent(project.id)}`;
 // form fields (URL, instructions, ...) are remembered per project
 const projectState = () => store.get().projects?.[project.id] ?? {};
@@ -123,22 +134,23 @@ $('projMenu').onclick = e => {
 document.addEventListener('click', e => { if (!$('projMenu').hidden && !e.target.closest('.switch-wrap')) closeMenu(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('projMenu').hidden) { closeMenu(); $('projSwitch').focus(); } });
 $('sideToggle').onclick = () => { const open = $('side').classList.toggle('open'); $('sideToggle').setAttribute('aria-expanded', String(open)); };
-$('liveChip').onclick = () => show('run');
 
 async function enterProject() {
+  const shownAtStart = shownViews; // a section the user opens while this loads must stay open
   document.title = `${project.name} · ABRA`;
   $('projName').textContent = project.name;
   const ps = projectState();
   $('url').value = ps.url ?? project.url ?? ''; $('task').value = ps.task ?? ''; $('taskTitle').value = ps.title ?? ''; $('expected').value = ps.expected ?? '';
   $('recUrl').value = ps.recUrl ?? project.url ?? '';
   attachFlow(null);
+  setEditing(null); // a prompt being edited belongs to the project left behind
   applyRoles();
   await loadSettings();
   for (const sel of document.querySelectorAll('.envSel')) { // the project's environment unless one was picked here before
     const want = ps[sel.id] ?? project.env;
     sel.value = want && [...sel.options].some(o => o.value === want) ? want : settings.activeEnv || '';
   }
-  show('ai');
+  if (shownViews === shownAtStart) show('ai');
 }
 
 // New / edit project dialog
@@ -149,6 +161,7 @@ function editProject(p) {
   $('projSave').textContent = p ? 'Save project' : 'Create project';
   $('projNameIn').value = p?.name ?? ''; $('projDesc').value = p?.description ?? ''; $('projUrl').value = p?.url ?? '';
   $('projApp').value = p?.app ?? '';
+  $('projGuidePrompt').value = p?.guidePrompt ?? '';
   $('projCodebase').value = [].concat(p?.codebase ?? []).join('\n');
   $('projLogoField').hidden = !p; // the logo is a file in the project's folder: it needs the project to exist
   $('projLogoMsg').textContent = '';
@@ -367,7 +380,7 @@ $('projForm').onsubmit = async e => {
   e.preventDefault();
   const rows = [...$('projDb').querySelectorAll('details[data-env]')];
   const body = JSON.stringify({
-    name: $('projNameIn').value, description: $('projDesc').value, url: $('projUrl').value, env: $('projEnv').value, app: $('projApp').value, codebase: $('projCodebase').value,
+    name: $('projNameIn').value, description: $('projDesc').value, url: $('projUrl').value, env: $('projEnv').value, app: $('projApp').value, guidePrompt: $('projGuidePrompt').value, codebase: $('projCodebase').value,
     db: Object.fromEntries(rows.map(d => [d.dataset.env, dbConfigOf(d)])),
     dbPasswords: Object.fromEntries(rows.map(d => [d.dataset.env, d.querySelector('[name=dpass]').value])),
   });
@@ -386,11 +399,10 @@ $('projDelete').onclick = async () => {
   try { await api(`/projects/${p.id}`, { method: 'DELETE' }); $('projDlg').close(); route(); }
   catch (err) { $('projErr').textContent = err.message; }
 };
-// the run's status pill; while a run goes on in the background, the sidebar chip; otherwise a short toast
+// the status pill of the run on screen, or a short toast elsewhere (the run in progress: liveStatus)
 function setStatus(text, kind = '') {
   $('status').textContent = text; $('status').className = 'pill ' + kind;
-  if (document.body.classList.contains('running')) $('liveText').textContent = text;
-  else if ($('view-run').hidden) toast(text);
+  if ($('view-run').hidden) toast(text);
 }
 let toastTimer;
 function toast(text) {
@@ -405,14 +417,16 @@ function show(view) {
   // leaving Settings with unsaved changes: ask first
   if (view !== 'settings' && !$('view-settings').hidden && settingsDirty().length
     && !confirm(`You have unsaved changes in ${settingsDirty().join(', ')}. Leave without saving?`)) return;
+  shownViews++;
   for (const v of ['home', 'setup', 'guide', 'ai', 'record', 'tests', 'workflows', 'history', 'settings', 'run']) (v === 'home' ? $('home') : $(`view-${v}`)).hidden = v !== view;
   const navView = view === 'run' ? origin : view;
   for (const b of document.querySelectorAll('nav.views button')) b.setAttribute('aria-current', b.dataset.view === navView ? 'page' : 'false');
-  $('liveChip').hidden = !document.body.classList.contains('running') || view === 'run';
+  syncChips();
   for (const b of document.querySelectorAll('.openSettings')) b.setAttribute('aria-current', view === 'settings' ? 'page' : 'false');
   if (!['settings', 'run', 'setup', 'guide'].includes(view)) lastPage = view;
   $('openSetup').setAttribute('aria-current', view === 'setup' ? 'page' : 'false');
   if (view === 'tests') loadTests();
+  if (view === 'ai') loadPrompts();
   if (view === 'history') loadHistory();
   if (view === 'workflows') loadWorkflows();
   $('scroll').scrollTop = 0; $('side').classList.remove('open');
@@ -597,12 +611,14 @@ $('reportProblem').onclick = async () => { try { window.open((await api('/report
 $('openSetup').onclick = async () => { try { renderSetup(await api('/setup/status')); show('setup'); } catch (err) { toast(err.message); } };
 
 /* ---------- live view ---------- */
-let live;
-function startLive(runId) { // the browser of one run; the server checks the run is in your projects
-  live?.close();
-  live = new EventSource('/screen?' + new URLSearchParams({ run: runId }));
-  live.addEventListener('frame', e => { $('frame').src = 'data:image/jpeg;base64,' + JSON.parse(e.data); $('stage').classList.add('has-frame'); });
-  live.addEventListener('url', e => { $('addr').textContent = JSON.parse(e.data); });
+let live, liveOf = null; // one screen stream: the browser of the run on screen
+function startLive(run) { // the server checks the run is in your projects
+  live?.close(); live = null; liveOf = run;
+  $('stage').classList.remove('has-frame');
+  if (!run.id) return; // still waiting for a free run slot: the 'run' event starts it
+  live = new EventSource('/screen?' + new URLSearchParams({ run: run.id }));
+  live.addEventListener('frame', e => { if (viewing !== run) return; $('frame').src = 'data:image/jpeg;base64,' + JSON.parse(e.data); $('stage').classList.add('has-frame'); });
+  live.addEventListener('url', e => { const u = JSON.parse(e.data); run.addr = u; if (viewing === run) $('addr').textContent = u; });
 }
 
 /* ---------- settings data (providers, sessions, secrets) ---------- */
@@ -640,8 +656,36 @@ boot();
 $('provider').onchange = () => { $('model').value = ''; $('model').placeholder = $('provider').selectedOptions[0].dataset.model || 'default'; };
 
 /* ---------- running (AI or replay), shared ---------- */
-let es, timer, started, current; // current = { kind, params, id, doneMsg }
-const clock = () => { const s = Math.round((Date.now() - started) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+let current; // the run on the page: one in progress, or one opened from History
+// Runs in progress, several at once (the server runs MAX_RUNS of them, the rest wait in line). Each streams into its
+// own record and has a chip in the sidebar; only the one on screen (viewing) is drawn. Opening another, or a History
+// run, leaves it going; its page is drawn again from its record when you open it.
+const liveRuns = new Set();
+let viewing = null, pageMeta = {};
+const paint = (run, fn) => { run.paints.push(fn); if (viewing === run) fn(); };
+function liveStatus(run, text, kind = '') {
+  run.status = [text, kind];
+  run.chip.lastChild.textContent = `${run.label}: ${text}`;
+  if (viewing === run) { $('status').textContent = text; $('status').className = 'pill ' + kind; }
+}
+function syncRunning() {
+  const any = liveRuns.size > 0;
+  document.body.classList.toggle('running', any);
+  $('toProjects').disabled = $('projSwitch').disabled = any; // runs belong to this project
+}
+// a run's chip shows unless that run is the page you are on
+const syncChips = () => { for (const r of liveRuns) r.chip.hidden = viewing === r && !$('view-run').hidden; };
+function showLive(run) {
+  current = viewing = run; origin = run.origin;
+  openRunPage(run.page);
+  setRunButtons('running'); stageMode('live'); $('rec').hidden = run.params.record !== '1'; $('caption').hidden = true;
+  if (run.addr) $('addr').textContent = run.addr;
+  if (liveOf !== run) startLive(run);
+  run.lastNote = null;
+  for (const fn of run.paints) fn();
+  $('status').textContent = run.status[0]; $('status').className = 'pill ' + run.status[1];
+}
+const clock = run => { const s = Math.round((Date.now() - run.started) / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 function addStep(t) {
   const { what, detail } = describe(t);
@@ -674,7 +718,8 @@ function caption(what, detail) {
   $('caption').classList.remove('pop'); void $('caption').offsetWidth; $('caption').classList.add('pop');
 }
 
-function openRunPage({ task, who, kind }) {
+function openRunPage(meta) {
+  const { task, who, kind } = pageMeta = meta;
   $('runTask').textContent = task; $('runWho').textContent = who;
   $('steps').replaceChildren(); $('log').textContent = ''; $('result').hidden = true;
   $('logWrap').hidden = kind === 'ai'; $('logWrap').open = false; $('issuesBox').hidden = true;
@@ -697,69 +742,88 @@ function stageMode(mode, run) {
 }
 
 function start(kind, params) {
-  if (document.body.classList.contains('running')) { show('run'); toast('A run is going: wait for it, or stop it first'); return; }
-  current = { kind, params, doneMsg: null };
+  const run = current = viewing = { kind, params, doneMsg: null, page: pageMeta, origin, paints: [], status: ['', ''], issues: [], started: Date.now() };
+  run.label = String(params.title || pageMeta.task || kind).split('\n')[0].slice(0, 60);
+  run.chip = document.createElement('button');
+  run.chip.type = 'button'; run.chip.className = 'live-chip'; run.chip.title = run.label;
+  run.chip.innerHTML = '<span class="live-dot"></span><span class="live-text"></span>';
+  run.chip.onclick = () => showLive(run);
+  $('liveChips').append(run.chip);
+  liveRuns.add(run); syncRunning();
+  openRunPage(run.page); // a clean page (Run again reuses the one on screen)
   stageMode('live');
-  started = Date.now();
-  document.body.classList.add('running');
-  $('toProjects').disabled = $('projSwitch').disabled = true; // the run belongs to this project
   setRunButtons('running');
-  $('rec').hidden = params.record !== '1';
-  setStatus('Running 0:00', 'run');
-  timer = setInterval(() => setStatus(`Running ${clock()}`, 'run'), 1000);
+  $('rec').hidden = params.record !== '1'; $('caption').hidden = true;
+  liveStatus(run, 'Running 0:00', 'run');
+  run.timer = setInterval(() => liveStatus(run, `Running ${clock(run)}`, 'run'), 1000);
 
-  $('stage').classList.remove('has-frame'); $('addr').textContent = 'about:blank'; // this run's own browser comes next
-  es = new EventSource(`/${{ ai: 'run', replay: 'replay', fix: 'fix', workflow: 'workflow-run' }[kind]}?` + new URLSearchParams({ ...params, project: project.id }));
-  current.issues = []; renderIssues([]);
-  let lastNote;
-  es.addEventListener('queued', e => { current.queued = true; clearInterval(timer); setStatus(`Waiting for a free run slot (#${JSON.parse(e.data).position} in line)`, 'run'); });
+  startLive(run); $('addr').textContent = 'about:blank'; // this run's own browser comes next
+  const es = run.es = new EventSource(`/${{ ai: 'run', replay: 'replay', fix: 'fix', workflow: 'workflow-run' }[kind]}?` + new URLSearchParams({ ...params, project: project.id }));
+  paint(run, () => renderIssues(run.issues));
+  es.addEventListener('queued', e => { run.queued = true; clearInterval(run.timer); liveStatus(run, `Waiting for a free run slot (#${JSON.parse(e.data).position} in line)`, 'run'); });
   es.addEventListener('run', e => {
-    current.id = JSON.parse(e.data).id;
-    startLive(current.id);
-    if (current.queued) { current.queued = false; started = Date.now(); timer = setInterval(() => setStatus(`Running ${clock()}`, 'run'), 1000); }
+    run.id = JSON.parse(e.data).id;
+    if (viewing === run) startLive(run);
+    if (run.queued) { run.queued = false; run.started = Date.now(); run.timer = setInterval(() => liveStatus(run, `Running ${clock(run)}`, 'run'), 1000); }
   });
-  es.addEventListener('text', e => { const t = JSON.parse(e.data); lastNote = { el: addNote(t), text: t }; lastNote.el.scrollIntoView({ block: 'nearest' }); });
-  es.addEventListener('tool', e => { const { li, what, detail } = addStep(JSON.parse(e.data)); caption(what, detail); li.scrollIntoView({ block: 'nearest' }); });
-  es.addEventListener('log', e => { $('log').textContent += JSON.parse(e.data) + '\n'; $('log').scrollTop = $('log').scrollHeight; });
-  es.addEventListener('issue', e => { current.issues.push(JSON.parse(e.data)); renderIssues(current.issues); });
+  es.addEventListener('text', e => { const t = JSON.parse(e.data); paint(run, () => { run.lastNote = { el: addNote(t), text: t }; run.lastNote.el.scrollIntoView({ block: 'nearest' }); }); });
+  es.addEventListener('tool', e => { const t = JSON.parse(e.data); paint(run, () => { const { li, what, detail } = addStep(t); caption(what, detail); li.scrollIntoView({ block: 'nearest' }); }); });
+  es.addEventListener('log', e => { const line = JSON.parse(e.data); paint(run, () => { $('log').textContent += line + '\n'; $('log').scrollTop = $('log').scrollHeight; }); });
+  es.addEventListener('issue', e => { run.issues.push(JSON.parse(e.data)); paint(run, () => renderIssues(run.issues)); });
   // workflows: a heading when a block starts, its result when it ends
   es.addEventListener('block', e => {
     const b = JSON.parse(e.data);
-    if (b.status === 'running') { addPlainStep({ section: blockTitle(b) }).scrollIntoView({ block: 'nearest' }); caption(blockTitle(b), BLOCKS[b.type]?.name ?? ''); }
-    else addBlockResult(b).scrollIntoView({ block: 'nearest' });
+    paint(run, () => {
+      if (b.status === 'running') { addPlainStep({ section: blockTitle(b) }).scrollIntoView({ block: 'nearest' }); caption(blockTitle(b), BLOCKS[b.type]?.name ?? ''); }
+      else addBlockResult(b).scrollIntoView({ block: 'nearest' });
+    });
   });
-  es.addEventListener('step', e => { const s = JSON.parse(e.data); if (current.kind === 'fix' && !current.verifyHeading) { current.verifyHeading = true; addPlainStep({ section: 'Verifying the corrected test (no AI)' }); } const li = addPlainStep(s); if (!s.section) caption(s.what, s.detail); li.scrollIntoView({ block: 'nearest' }); });
-  es.addEventListener('fail', e => { const msg = JSON.parse(e.data); addNote(msg, 'error'); if (!msg.startsWith('Recording failed')) current.doneMsg = 'Error'; });
-  es.addEventListener('stopped', () => { current.doneMsg = 'Stopped'; });
+  es.addEventListener('step', e => {
+    const s = JSON.parse(e.data);
+    const heading = run.kind === 'fix' && !run.verifyHeading;
+    if (heading) run.verifyHeading = true;
+    paint(run, () => { if (heading) addPlainStep({ section: 'Verifying the corrected test (no AI)' }); const li = addPlainStep(s); if (!s.section) caption(s.what, s.detail); li.scrollIntoView({ block: 'nearest' }); });
+  });
+  es.addEventListener('fail', e => { const msg = JSON.parse(e.data); paint(run, () => addNote(msg, 'error')); if (!msg.startsWith('Recording failed')) run.doneMsg = 'Error'; });
+  es.addEventListener('stopped', () => { run.doneMsg = 'Stopped'; });
   es.addEventListener('done', e => {
     const d = JSON.parse(e.data);
-    if (lastNote && lastNote.text === d.text) lastNote.el.remove(); // the final answer is shown in the result card
-    current.doneMsg = d.ok ? 'Passed' : 'Failed';
-    setStatus('Saving results', 'run');
+    paint(run, () => { if (run.lastNote && run.lastNote.text === d.text) run.lastNote.el.remove(); }); // the final answer is shown in the result card
+    run.doneMsg = d.ok ? 'Passed' : 'Failed';
+    liveStatus(run, 'Saving results', 'run');
   });
   es.addEventListener('saved', async e => {
     const { id } = JSON.parse(e.data);
-    finish();
-    const run = await api(`/history/${id}`);
-    renderResult(run, { live: true });
+    const shown = viewing === run;
+    finish(run);
+    const saved = await api(`/history/${id}`);
+    if (shown) renderResult(saved, { live: true });
+    else toast(`The run finished: ${STATUS[saved.status] ?? saved.status}. It is in History.`);
   });
-  es.onerror = () => { if (document.body.classList.contains('running')) { finish(); setStatus(current.doneMsg ?? 'Connection lost', 'fail'); } };
+  es.onerror = () => {
+    if (!liveRuns.has(run)) return;
+    const shown = viewing === run;
+    finish(run);
+    if (shown) setStatus(run.doneMsg ?? 'Connection lost', 'fail'); else toast(`The run ended: ${run.doneMsg ?? 'connection lost'}`);
+  };
 }
 
-function finish() {
-  es?.close(); clearInterval(timer);
-  document.body.classList.remove('running');
-  $('toProjects').disabled = $('projSwitch').disabled = false;
-  $('liveChip').hidden = true;
+function finish(run) {
+  run.es.close(); clearInterval(run.timer);
+  liveRuns.delete(run); run.chip.remove(); syncRunning();
+  if (liveOf === run) { live?.close(); live = null; liveOf = null; }
+  if (viewing !== run) return; // another run or a History run on screen keeps its page
+  viewing = null;
   $('rec').hidden = true; $('caption').hidden = true;
   setRunButtons('done');
 }
 
 // Stop asks the server, so the stream stays open and the partial recording + history entry still arrive
-$('stop').onclick = () => {
-  if (current?.queued) { finish(); setStatus('Removed from the queue'); return; } // not ours to stop: someone else's run is going
-  $('stop').disabled = true; setStatus('Stopping…', 'run');
-  fetch(`/stop?${new URLSearchParams({ run: current.id })}`, { method: 'POST' }).catch(() => finish());
+$('stop').onclick = () => { // the run on screen
+  const run = viewing; if (!run) return;
+  if (run.queued) { finish(run); setStatus('Removed from the queue'); return; } // leaving the line: the server drops it
+  $('stop').disabled = true; liveStatus(run, 'Stopping…', 'run');
+  fetch(`/stop?${new URLSearchParams({ run: run.id })}`, { method: 'POST' }).catch(() => finish(run));
 };
 $('back').onclick = () => show(origin);
 $('again').onclick = () => { if (current) start(current.kind, current.params); };
@@ -866,9 +930,10 @@ function renderResult(run, { live = false } = {}) {
     copy.title = 'Copy the Playwright script'; view.title = 'Show the Playwright script';
     row('Script', copy, view);
     r.append(pre);
+    if (run.scriptFrom === 'browser') { const n = document.createElement('p'); n.className = 'hint'; n.textContent = 'Built from the browser steps that ran: the AI wrote no test. It has no expect() checks yet; add them in Edit after saving.'; r.append(n); }
     r.append(inlineForm('Save as test', 'test-name, e.g. login-and-checkout', slugify(run.title || (run.task ?? '').split('\n')[0]).slice(0, 40), async name => {
-      const { name: saved } = await api(withProject('/tests'), { method: 'POST', body: JSON.stringify({ name, runId: run.id }) });
-      return `Saved as tests/${project.id}/${saved}.spec.ts. Replay it from the Saved tests tab.`;
+      const res = await api(withProject('/tests'), { method: 'POST', body: JSON.stringify({ name, runId: run.id }) });
+      return `Saved as tests/${project.id}/${res.name}.spec.ts. Replay it from the Saved tests tab.${res.missingFiles ? ` File ${res.missingFiles.join(', ')} no longer available: add it in Edit test › Files.` : ''}`;
     }));
   }
   // the AI's browser stays open after a live run, so its login can be captured now
@@ -905,9 +970,16 @@ function fixTest(runId, name) {
 }
 
 /* ---------- AI form ---------- */
+let aiFiles = []; // [{ id, name, size }] uploaded for the next Run AI (server: app/data/uploads)
+const showAiFiles = () => renderFiles($('aiFiles'), aiFiles, n => { aiFiles = aiFiles.filter(f => f.name !== n); showAiFiles(); });
+$('aiFileIn').onchange = async e => {
+  try { for (const f of e.target.files) { const up = await sendFile(`/uploads?name=${encodeURIComponent(f.name)}`, f); aiFiles = [...aiFiles.filter(x => x.name !== up.name), { ...up, size: f.size }]; } }
+  catch (err) { toast(err.message); }
+  e.target.value = ''; showAiFiles();
+};
 $('f').onsubmit = e => {
   e.preventDefault();
-  const params = { url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value, record: $('record').checked ? '1' : '', guide: $('guide').checked ? '1' : '', flow: attachedFlow ?? '', env: $('aiEnv').value, expected: $('expected').value.trim() };
+  const params = { url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value, record: $('record').checked ? '1' : '', guide: $('guide').checked ? '1' : '', flow: attachedFlow ?? '', env: $('aiEnv').value, expected: $('expected').value.trim(), files: aiFiles.length ? JSON.stringify(aiFiles.map(({ id, name }) => ({ id, name }))) : '', prompt: editingPrompt?.id ?? '' };
   store.set({ provider: params.provider, model: params.model, record: $('record').checked, guide: $('guide').checked, aiSession: params.session });
   storeProject({ url: params.url, title: params.title, task: params.task, expected: params.expected, aiEnv: params.env });
   origin = 'ai';
@@ -915,6 +987,85 @@ $('f').onsubmit = e => {
   start('ai', params);
 };
 $('task').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('f').requestSubmit(); });
+
+/* ---------- saved prompts (prompts.mjs): the Run AI form kept to run later ---------- */
+let editingPrompt = null; // { id, title } while the form holds a saved prompt
+function setEditing(p) {
+  editingPrompt = p;
+  $('promptEditing').hidden = !p;
+  $('promptEditingName').textContent = p?.title ?? '';
+}
+const promptBody = () => JSON.stringify({
+  url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, expected: $('expected').value.trim(),
+  env: $('aiEnv').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value,
+  record: $('record').checked, guide: $('guide').checked, flow: attachedFlow ?? '', files: aiFiles.map(({ id, name }) => ({ id, name })),
+});
+let promptStep = 0; // bumped by every save or open: a reply that arrives after the form moved on is ignored
+$('savePrompt').onclick = async () => {
+  if (!$('task').value.trim()) { $('task').focus(); return toast('Write the instructions first'); }
+  const was = editingPrompt, proj = project.id, step = ++promptStep;
+  const title = $('taskTitle').value.trim() || $('task').value.trim().split('\n')[0];
+  $('savePrompt').disabled = true; // one save at a time: a double click must not make two prompts
+  try {
+    const { id } = was
+      ? await api(withProject(`/prompts/${was.id}`), { method: 'PUT', body: promptBody() })
+      : await api(withProject('/prompts'), { method: 'POST', body: promptBody() });
+    if (project?.id !== proj) return;
+    if (step === promptStep && editingPrompt === was) setEditing({ id, title });
+    toast('Prompt saved: open it from Saved prompts to run it');
+    loadPrompts();
+  } catch (err) { toast(err.message); }
+  finally { $('savePrompt').disabled = false; }
+};
+$('promptNew').onclick = () => {
+  setEditing(null);
+  $('taskTitle').value = ''; $('task').value = ''; $('expected').value = '';
+  aiFiles = []; showAiFiles(); attachFlow(null);
+  $('task').focus();
+};
+async function loadPrompts() {
+  try {
+    const [list, history] = await Promise.all([api(withProject('/prompts')), api(withProject('/history'))]);
+    const last = {};
+    for (const r of history) if (r.prompt && !last[r.prompt]) last[r.prompt] = r; // history is newest first
+    $('promptList').innerHTML = !list.length
+      ? '<div class="emptybox"><strong>No saved prompts yet</strong>Fill in the form and press Save prompt to run it later.</div>'
+      : `<div class="list">${list.map(p => {
+        const r = last[p.id], files = p.files.length ? ` · ${p.files.length} file${p.files.length > 1 ? 's' : ''}` : '';
+        return `<div class="item row-item" data-id="${esc(p.id)}">
+          <span class="dot ${esc(r?.status ?? '')}"></span>
+          <button type="button" class="prompt-open" data-act="open"><span class="title">${esc(p.title || p.task)}</span><span class="meta">${esc(p.url)}${files} · Saved ${esc(ago(Date.parse(p.saved)))}</span></button>
+          <span class="tag ${esc(r?.status ?? '')}">${r ? `${esc(STATUS[r.status] ?? r.status)} ${esc(ago(r.started))}` : 'Not run yet'}</span>
+          <span class="ractions"><button type="button" class="icon-btn danger" data-act="delete" aria-label="Delete ${esc(p.title || p.id)}" title="Delete">${icon('trash')}</button></span>
+        </div>`;
+      }).join('')}</div>`;
+  } catch (err) {
+    $('promptList').innerHTML = `<div class="emptybox"><strong>Saved prompts could not be loaded</strong>${esc(err.message)}</div>`;
+  }
+}
+$('promptList').onclick = async e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const id = b.closest('[data-id]').dataset.id;
+  try {
+    if (b.dataset.act === 'delete') {
+      if (!confirm('Delete this saved prompt?')) return;
+      await api(withProject(`/prompts/${id}`), { method: 'DELETE' });
+      if (editingPrompt?.id === id) setEditing(null);
+      return loadPrompts();
+    }
+    const proj = project.id, step = ++promptStep;
+    const [p, files] = await Promise.all([api(withProject(`/prompts/${id}`)), api(withProject(`/prompts/${id}/use`), { method: 'POST' })]);
+    if (step !== promptStep || project?.id !== proj) return; // another prompt was opened or saved meanwhile
+    $('url').value = p.url; $('taskTitle').value = p.title; $('task').value = p.task; $('expected').value = p.expected;
+    // an AI, environment or session removed since keeps the current choice
+    for (const [sel, v] of [['provider', p.provider], ['aiEnv', p.env], ['aiSession', p.session]]) if ([...$(sel).options].some(o => o.value === v)) $(sel).value = v;
+    $('model').value = p.model; $('record').checked = p.record; $('guide').checked = p.guide;
+    attachFlow(p.flow || null);
+    aiFiles = files; showAiFiles();
+    setEditing({ id, title: p.title || p.task.split('\n')[0] });
+    $('scroll').scrollTop = 0; $('task').focus();
+  } catch (err) { toast(err.message); }
+};
 
 /* ---------- saved tests ---------- */
 let lastByTest = {};
@@ -1033,6 +1184,8 @@ $('historyList').onclick = async e => {
   const b = e.target.closest('button.item'); if (!b) return;
   const run = await api(`/history/${b.dataset.id}`);
   origin = 'history';
+  viewing = null; // runs in progress go on in the background (sidebar chips)
+  $('rec').hidden = true; $('caption').hidden = true;
   openRunPage({ kind: run.kind, task: run.task ?? '', who: `${new Date(run.started).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}${run.provider ? `, ${run.provider}` : ''}${run.session ? `, session ${run.session}` : ''}` });
   setRunButtons('history');
   stageMode('past', run);
@@ -1178,8 +1331,25 @@ async function editTest(name) {
   const [code, csv] = await Promise.all([api(withProject(`/tests/${name}`)), api(withProject(`/tests/${name}/data`))]);
   $('editTitle').textContent = `Edit tests/${project.id}/${name}.spec.ts`;
   $('editCode').value = code; $('editCsv').value = csv; $('editErr').textContent = '';
+  await loadEditFiles();
   $('editDlg').showModal();
 }
+// a failed list or delete shows in the dialog's error line; it never keeps the dialog from opening
+async function loadEditFiles() {
+  try {
+    const files = await api(withProject(`/tests/${editing}/files`));
+    renderFiles($('editFiles'), files, async n => {
+      try { await api(withProject(`/tests/${editing}/files/${encodeURIComponent(n)}`), { method: 'DELETE' }); }
+      catch (err) { $('editErr').textContent = err.message; }
+      loadEditFiles();
+    });
+  } catch (err) { $('editErr').textContent = err.message; }
+}
+$('editFileIn').onchange = async e => {
+  try { for (const f of e.target.files) await sendFile(withProject(`/tests/${editing}/files?name=${encodeURIComponent(f.name)}`), f); }
+  catch (err) { $('editErr').textContent = err.message; }
+  e.target.value = ''; loadEditFiles();
+};
 $('editCancel').onclick = $('editClose').onclick = () => $('editDlg').close();
 $('editForm').onsubmit = async e => {
   e.preventDefault();
@@ -1211,6 +1381,12 @@ $('recDevice').onchange = syncDevice;
 
 function selectTab(btn) { for (const t of document.querySelectorAll('#sf .tab')) { t.setAttribute('aria-selected', String(t === btn)); $(t.getAttribute('aria-controls')).hidden = t !== btn; } }
 for (const t of document.querySelectorAll('#sf .tab')) t.onclick = () => selectTab(t);
+/* Appearance: per computer and applied at once; the <head> script in index.html owns the value */
+const themeBtns = [...document.querySelectorAll('[data-theme-pick]')];
+const markTheme = () => { for (const b of themeBtns) b.setAttribute('aria-pressed', String(b.dataset.themePick === window.__theme())); };
+for (const b of themeBtns) b.onclick = () => { window.__setTheme(b.dataset.themePick); markTheme(); };
+markTheme();
+$('scroll').addEventListener('scroll', e => e.target.classList.toggle('scrolled', e.target.scrollTop > 4), { passive: true });
 
 // One collapsible row per provider; API keys are write-only (server never returns them)
 function providerRow(p = { engine: 'openai-compatible' }, open = false) {

@@ -7,6 +7,7 @@
 //   {{random}}                          6 digits, the same everywhere within one run
 //   {{runId}}                           YYYYMMDDHHmmss of the run, the same everywhere within one run
 //   {{data.column}}                     a column of the current data-set row
+//   {{file.name}}                       the path of the test's file "name" (Edit test › Files)
 //   {{baseUrl}}, {{anyName}}            variables of the chosen environment
 //   {{SECRET_NAME}}                     secrets (uppercase names), from SECRET_* in .env; in environment "e2e"
 //                                       a secret NAME_E2E, if set, is used instead of NAME
@@ -20,7 +21,7 @@ function format(d, fmt) {
 const envSuffix = envName => String(envName ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '_');
 const pickSecret = (secrets, name, envName) => (envName && secrets[`${name}_${envSuffix(envName)}`] !== undefined ? secrets[`${name}_${envSuffix(envName)}`] : secrets[name]);
 
-function makeResolver({ vars = {}, secrets = {}, row = null, now = new Date(), runId, random, envName } = {}) {
+function makeResolver({ vars = {}, secrets = {}, row = null, now = new Date(), runId, random, envName, files = null } = {}) {
   const stamp = runId ?? format(now, 'YYYYMMDDHHmm') + pad(now.getSeconds());
   const rnd = random ?? String(Math.floor(100000 + Math.random() * 900000));
   function value(expr) {
@@ -38,6 +39,11 @@ function makeResolver({ vars = {}, secrets = {}, row = null, now = new Date(), r
       if (!row) throw new Error(`{{${name}}} needs a data set: add one to this test (Saved tests > Edit)`);
       if (!(col[1] in row)) throw new Error(`The data set has no column "${col[1]}"`);
       return row[col[1]];
+    }
+    const file = name.match(/^file\.(.+)$/);
+    if (file) {
+      if (!files || !Object.hasOwn(files, file[1])) throw new Error(`File {{${name}}} not found: add it in Edit test › Files`);
+      return files[file[1]];
     }
     if (/^[A-Z][A-Z0-9_]*$/.test(name)) {
       const value = pickSecret(secrets, name, envName);
@@ -78,4 +84,13 @@ function parseCsv(text) {
   return body.map(r => Object.fromEntries(cols.map((c, i) => [c, (r[i] ?? '').trim()])));
 }
 
-module.exports = { makeResolver, secretsFromEnv, parseCsv, format, pickSecret };
+// Hide run files and secrets in text the AI reads. File paths go first (a secret inside a path would otherwise break the
+// path match); each path is also masked JSON-escaped, as MCP writes it into code (Windows backslashes double).
+// ponytail: plain substring masking; secrets shorter than 4 chars are skipped to avoid masking random text
+function maskWith(text, { files = [], secrets = [] }) {
+  const paths = files.flatMap(([n, p]) => [[n, p], [n, JSON.stringify(p).slice(1, -1)]]).sort((a, b) => b[1].length - a[1].length);
+  const t = paths.reduce((t, [n, p]) => t.split(p).join(`{{file.${n}}}`), text);
+  return secrets.reduce((t, [n, v]) => v.length >= 4 ? t.split(v).join(`{{${n}}}`) : t, t);
+}
+
+module.exports = { maskWith, makeResolver, secretsFromEnv, parseCsv, format, pickSecret };

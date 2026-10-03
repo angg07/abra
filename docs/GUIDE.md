@@ -121,9 +121,18 @@ for you. Providers, secrets, login sessions, environments and schedules are shar
 |---|---|
 | **Run AI** | URL + instructions in plain language. The AI (Claude Code, or any OpenAI-compatible API) drives the browser. Optional: login session, environment, recorded flow, video, PDF guide. |
 | **Record flow** | Opens Playwright codegen on your desktop. Click through the flow, close the window, then copy the script, save it as a test, or give it to the AI as a route map. |
-| **Saved tests** | Plain `@playwright/test` files in `tests/<project>/`. Replay one, or tick several to run a suite, without AI. **Edit** opens the script and its CSV data set. A failing test gets **Fix with AI**. |
+| **Saved tests** | Plain `@playwright/test` files in `tests/<project>/`. Replay one, or tick several to run a suite, without AI. **Edit** opens the script and its CSV data set. A failing test gets **Fix with AI**. Files: templates and documents a test uploads live in `tests/<project>/files/<test>/` (Edit test › Files, 20 MB each); the script uses `setInputFiles('{{file.name}}')`. Files added to a Run AI are kept with the test when you save it. |
 | **Workflows** | Blocks chained in one browser, edited in Workflow Studio (below). |
 | **History** | Every run with its result, steps, errors, video, PDF guide and HTML report. |
+
+### Saved prompts
+
+**Run AI > Save prompt** keeps the whole form (URL, title, instructions, expected result, AI, environment, session,
+video/PDF choices, an attached flow and its files) without running it. **Saved prompts** under the form lists them per
+project with their last run. Click one to fill the form back, then press Run AI, or change it and press Save prompt to
+update it (**New prompt** starts an empty one). Running a prompt keeps it. Saved prompts and their files are in
+`tests/<project>/prompts/` and `prompt-files/`, and travel with project export and import (an export that holds
+saved prompts needs ABRA 1.3.0 or newer to import).
 
 ### Workflows
 
@@ -157,6 +166,7 @@ Write these in instructions, URLs and tests; they are filled in when the step ru
 | `{{now}}`, `{{random}}`, `{{runId}}` | `2026-09-26 14:05`, `523510`, `20260926140512` |
 | `{{baseUrl}}`, `{{anyName}}` | values of the chosen environment (**Settings > Environments**) |
 | `{{data.column}}` | the current row of the test's data set (`tests/<project>/data/<test>.csv`) |
+| `{{file.name}}` | a file of the test (Edit test › Files) or of the Run AI (Files): the path is filled in when the upload runs |
 | `{{ADMIN_PASS}}` | a secret: typed into the browser, never shown to the AI |
 
 Saved tests use them through `fill('...')` from `tests/support/vars.ts`; the app adds those calls when it
@@ -178,7 +188,8 @@ The app has no accounts: it runs on your computer, for you. **Secrets** are give
 project.
 
 **Parallel runs**: up to `MAX_RUNS` runs (AI, replays, fixes, workflows) go at once, each in its own browser
-(default `MAX_RUNS=2`; each browser needs a few hundred MB of memory). More runs wait in line. Runs that reset
+(default `MAX_RUNS=2`; each browser needs a few hundred MB of memory). More runs wait in line. Start another run
+while one goes: each run in progress gets a chip in the sidebar that opens it (the browser, its steps, Stop). Runs that reset
 the same test database always take turns. Browser debugging ports come from 9400–9499.
 
 The app's own data (run history) is one SQLite file, `app/data/app.db` (Node's built-in `node:sqlite`); back it
@@ -246,6 +257,11 @@ takes the current screens after an intended change. Hide changing parts (dates, 
 (WCAG 2 A/AA). Serious and critical problems are listed per page, apart from app errors, in the result card,
 the HTML report, History and notifications.
 
+### Appearance
+
+**Settings > Appearance**: Dark (the default), Light, or System (follows the computer, also when it switches).
+It applies at once and is kept per computer. The fonts ship with the app, so it looks the same offline.
+
 ### Continuous integration
 
 **Saved tests > Export CI workflow** writes `.github/workflows/e2e.yml`: on every push to `main` (or by hand,
@@ -276,7 +292,7 @@ app/
   vars-core.cjs      {{...}} test values, shared by the proxy and tests
   guard.cjs          production block list (browser flags, checks)
   test/              unit tests for the app itself: npm run test:app
-tests/<project>/     a project: project.json, its saved tests, data/ (CSV data sets)
+tests/<project>/     a project: project.json, its saved tests, data/ (CSV data sets), files/ (upload files per test)
 tests/support/       helpers shared by all tests (fill() values, dbQuery)
 ```
 

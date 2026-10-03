@@ -22,13 +22,34 @@ export const expectedVerdict = text => { const m = String(text).match(/EXPECTED:
 
 // AI answer → { evidence, script }: drops the RESULT/EXPECTED lines and pulls out the generated test
 export function splitAnswer(text = '') {
-  const script = text.match(/```(?:ts|typescript|js|javascript)?\n([\s\S]*?)```/)?.[1] ?? null;
+  // whole fenced blocks, opening and closing fence paired (a lone closing fence must never open a block); answers
+  // often hold a mermaid diagram or JSON too: the test is the last ts/js (or untagged) block, preferring one with test()
+  const code = [...text.matchAll(/^```(\w*)[^\n]*\n([\s\S]*?)^```/gm)].filter(b => /^(ts|typescript|js|javascript)?$/i.test(b[1])).map(b => b[2]);
+  const script = code.findLast(c => /@playwright\/test|\btest\s*\(/.test(c)) ?? code.at(-1) ?? null;
   const evidence = text.replace(/```[\s\S]*?```/g, '')
     .replace(/^\s*\d*\.?\s*\**RESULT:\s*\w+\**\s*/i, '')
     .replace(/^\s*\**EXPECTED:\s*(NOT\s+)?MET\**\s*[.:,;\-–—]?\s*/i, '')
     .trim();
   return { evidence, script };
 }
+
+// Playwright MCP reports the code each browser action ran: a "### Ran Playwright code" section with a js block
+export const ranCode = text => String(text).match(/^### Ran Playwright code\n```\w*\n([\s\S]*?)\n```/m)?.[1] ?? null;
+// MCP reports a file upload as its own step, `await fileChooser.setFiles([...])`, after the click that opened the
+// chooser: as a test, the click must wait for the chooser, so the two become one block
+const withChoosers = code => code.reduce((out, c) => {
+  const files = c.match(/^await fileChooser\.setFiles\((.*)\);?$/s)?.[1];
+  if (files && out.length) out.push(['{', "  const fileChooser = page.waitForEvent('filechooser');", ...out.pop().split('\n').map(l => `  ${l}`), `  await (await fileChooser).setFiles(${files});`, '}'].join('\n'));
+  else out.push(c);
+  return out;
+}, []);
+// A test from the code the browser actually ran, for an AI answer that holds none (no assertions: the AI judged the result)
+export const scriptFromCode = (title, code) => `import { test, expect } from '@playwright/test';
+
+test('${String(title || 'Recorded run').replace(/['\\]/g, '\\$&').replace(/\n/g, ' ')}', async ({ page }) => {
+${withChoosers(code).flatMap(c => c.split('\n')).map(l => `  ${l}`).join('\n')}
+});
+`;
 
 // Line diff (LCS) between a test and its AI fix, as HTML: removed lines first, then added
 export function lineDiff(a, b) {

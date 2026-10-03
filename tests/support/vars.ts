@@ -1,7 +1,7 @@
 // fill('...') resolves {{...}} test values in saved tests: {{today+3}}, {{random}}, {{baseUrl}}, {{data.column}},
 // {{SECRET_NAME}}. The full list is in app/vars-core.cjs. The app adds the calls when it saves a test.
 import { test } from '@playwright/test';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { makeResolver, secretsFromEnv, parseCsv } from '../../app/vars-core.cjs';
 
@@ -21,6 +21,15 @@ function dataRow(): Record<string, string> | null {
   return rows[info.repeatEachIndex % rows.length]; // repeats cycle through the rows (rows x times)
 }
 
+// Files of the test: tests/<project>/files/<test name>/ (E2E_FILES_DIR: the project's files/ folder when the
+// test file itself runs from elsewhere, e.g. a fix being verified)
+function testFiles(): Record<string, string> {
+  const info = test.info();
+  const dir = join(process.env.E2E_FILES_DIR || join(dirname(info.file), 'files'), basename(info.file).replace(/\.spec\.ts$/, ''));
+  if (!existsSync(dir)) return {};
+  return Object.fromEntries(readdirSync(dir).map(f => [f, join(dir, f)]));
+}
+
 export function fill(text: string): string {
   const info = test.info();
   const key = `${info.testId}#${info.repeatEachIndex}`;
@@ -30,6 +39,7 @@ export function fill(text: string): string {
     secrets: secretsFromEnv(),
     envName: process.env.E2E_ENV, // NAME_<ENV> secrets win in that environment
     row: /\{\{\s*data\./.test(text) ? dataRow() : null,
+    files: /\{\{\s*file\./.test(text) ? testFiles() : null,
     now: runNow,
     random: perTest.get(key)!.random,
   }).fill(text);

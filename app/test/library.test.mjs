@@ -59,3 +59,9 @@ test('folder picker: subfolders only (hidden ones last) with full paths; home by
     assert.throws(() => listFolders(join(dir, 'README.md')), /Not a folder/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a multi-file setInputFiles list fills each {{file.X}} and adds the fill import', () => {
+  const out = prepareScript("test('x', async ({ page }) => { await page.locator('input').setInputFiles(['{{file.A.pdf}}', '{{file.B.xlsx}}']); });");
+  assert.match(out, /setInputFiles\(\[fill\('\{\{file\.A\.pdf\}\}'\), fill\('\{\{file\.B\.xlsx\}\}'\)\]\)/);
+  assert.match(out, /import \{[^}]*\bfill\b[^}]*\} from/);
+});

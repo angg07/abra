@@ -18,3 +18,4 @@ dist/
 # desktop app build (desktop/build.mjs)
 desktop/node_modules/
 desktop/payload/
+.superpowers/

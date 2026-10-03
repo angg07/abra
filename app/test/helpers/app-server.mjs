@@ -22,5 +22,5 @@ export async function startApp({ port, env = {} }) {
   const cookie = (await fetch(base + '/')).headers.get('set-cookie').split(';')[0];
   const req = (path, opts = {}) => fetch(base + path, { ...opts, headers: { cookie, ...(opts.body && { 'content-type': 'application/json' }), ...opts.headers } });
   const stop = () => { server.kill('SIGTERM'); rmSync(tmp, { recursive: true, force: true }); };
-  return { base, req, stop, root, cookie };
+  return { base, req, stop, root, cookie, dbFile: join(tmp, 'app.db') };
 }

@@ -78,11 +78,12 @@ export function claudeCode({ provider, model, prompt, system, mcpConfigPath, cwd
 // ponytail: plain fetch + tool-calling loop, no provider SDKs
 export async function openaiCompatible({ provider, model, prompt, system, mcpServer, cwd }, emit, signal) {
   const apiKey = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : undefined;
-  const mcp = new Client({ name: 'abra', version: '1.0.0' });
-  await mcp.connect(new StdioClientTransport({ ...mcpServer, env: { ...getDefaultEnvironment(), ...mcpServer.env }, cwd, stderr: 'ignore' })); // env alone would drop PATH/HOME
-  signal.addEventListener('abort', () => mcp.close());
+  // no mcpServer: a plain text answer, no tools (e.g. rewriting the texts of a guide)
+  const mcp = mcpServer ? new Client({ name: 'abra', version: '1.0.0' }) : null;
+  if (mcp) await mcp.connect(new StdioClientTransport({ ...mcpServer, env: { ...getDefaultEnvironment(), ...mcpServer.env }, cwd, stderr: 'ignore' })); // env alone would drop PATH/HOME
+  signal.addEventListener('abort', () => mcp?.close());
   try {
-    const { tools } = await mcp.listTools();
+    const { tools } = mcp ? await mcp.listTools() : { tools: [] };
     const fnTools = tools.map(({ name, description, inputSchema: { $schema, ...parameters } }) =>
       ({ type: 'function', function: { name, description, parameters } }));
     const messages = [{ role: 'system', content: system }, { role: 'user', content: prompt }];
@@ -95,7 +96,7 @@ export async function openaiCompatible({ provider, model, prompt, system, mcpSer
       const r = await fetch(`${provider.baseURL.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(apiKey && { authorization: `Bearer ${apiKey}` }) },
-        body: JSON.stringify({ model, messages, tools: fnTools }),
+        body: JSON.stringify({ model, messages, ...(fnTools.length && { tools: fnTools }) }),
         signal,
       });
       if (!r.ok) throw new Error(`${provider.label} HTTP ${r.status}: ${(await r.text()).slice(0, 800)}`);
@@ -117,7 +118,7 @@ export async function openaiCompatible({ provider, model, prompt, system, mcpSer
     }
     throw new Error(`Stopped after ${MAX_TURNS} turns without finishing`);
   } finally {
-    await mcp.close().catch(() => {});
+    await mcp?.close().catch(() => {});
   }
 }
 

@@ -16,18 +16,20 @@ import guard from './guard.cjs';
 const { makeResolver, parseCsv, secretsFromEnv } = varsCore;
 import { runTests } from './replay.mjs';
 import { addRun, getRun, listRuns, patchRun, removeRuns, runOfFile, dataDir } from './history.mjs';
+import { MAX_FILE, tooLarge, listTestFiles, saveTestFile, deleteTestFile, saveUpload, pickUploads, copyUploads, pruneUploads, filesIn, testFilesDir } from './test-files.mjs';
+import { listPrompts, readPrompt, savePrompt, deletePrompt, usePromptFiles, promptExists } from './prompts.mjs';
 import { buildReport } from './report.mjs';
 import { pruneDir, pruneFolders } from './housekeeping.mjs';
 import { dueSchedules, validSchedules, scheduleState, DAYS } from './scheduler.mjs';
 import { notify, summary } from './notify.mjs';
 import { ciWorkflow } from './ci.mjs';
 import { recordFlow, stopRecording, isRecording, flowScript, flowStorage } from './recorder.mjs';
-import { splitAnswer, flakyOf, expectedVerdict, isAppError } from './shared.mjs';
+import { splitAnswer, scriptFromCode, flakyOf, expectedVerdict, isAppError } from './shared.mjs';
 import { checkRequirements, installBrowsers, OS_NAMES } from './setup.mjs';
 import { issueUrl } from './issue.mjs';
 import { release as osRelease } from 'node:os';
 import { spawn } from 'node:child_process';
-import { aiStep, replayStep, guideCollector, buildGuidePdf, secretMasker, runTitle, entersValue, guideFolder, readGuideDoc, cleanGuideDoc, renderGuidePdf, FRAME_FILE, frameType, guideFrames, addGuideFrame, pruneGuideFrames } from './guide.mjs';
+import { aiStep, replayStep, guideCollector, buildGuidePdf, rewriteGuide, secretMasker, runTitle, entersValue, guideFolder, readGuideDoc, cleanGuideDoc, renderGuidePdf, FRAME_FILE, frameType, guideFrames, addGuideFrame, pruneGuideFrames } from './guide.mjs';
 import { finishVideo } from './video.mjs';
 import { GUIDE_LANGS, guideLabels, translateStep } from './guide-i18n.mjs';
 import { validWorkflow, fillRefs, loopItems, blockPrompt, readAnswer, SYSTEM as WF_SYSTEM } from './workflow.mjs';
@@ -40,6 +42,8 @@ const recordingsDir = join(dir, 'recordings');
 const guidesDir = join(dir, 'guides');
 const sessionsDir = join(dataDir, 'sessions');
 const visualDir = join(dataDir, 'visual');
+const uploadsDir = join(dataDir, 'uploads'); // Run AI files waiting for their run (test-files.mjs)
+pruneUploads(uploadsDir);
 const logoFile = join(dataDir, 'branding', 'logo');
 
 // Everything the server prints also lands in app/data/server.log: after the terminal is gone you can still tell a crash from a stop
@@ -128,8 +132,11 @@ function validEnvironments(list = [], active = '') {
 }
 // One MCP server per AI run: its own browser port, output folder and environment values.
 // Claude Code reads the config from a file; the OpenAI-compatible engine takes the object.
-function mcpFor(runDir, port, env, project) {
-  const mcpServer = mcpServerFor(port, join(runDir, 'mcp'), { vars: env.vars, env: env.name, secrets: projectSecrets(project) });
+const ranCodeFile = runDir => join(runDir, 'ran-code.jsonl');
+const readRanCode = runDir => { try { return readFileSync(ranCodeFile(runDir), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)); } catch { return []; } };
+// files: { name: path } the AI may upload, already in <runDir>/mcp/files (Playwright MCP uploads only from its output folder)
+function mcpFor(runDir, port, env, project, files = {}) {
+  const mcpServer = mcpServerFor(port, join(runDir, 'mcp'), { vars: env.vars, env: env.name, secrets: projectSecrets(project), files }, ranCodeFile(runDir));
   const mcpConfigPath = join(runDir, 'mcp.json');
   writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { playwright: mcpServer } }));
   return { mcpConfigPath, mcpServer };
@@ -324,7 +331,11 @@ function trimIdle() {
   const runs = [...active.entries()].map(([id, r]) => ({ id, done: r.done, doneAt: r.doneAt, browser: r.stage.hasOwnBrowser() }));
   for (const id of idleToClose(runs, MAX_RUNS)) { active.get(id).stage.close(); active.delete(id); }
 }
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { console.log(`Stopped (${sig})`); await Promise.all([...active.values()].map(r => r.stage.close())); process.exit(0); }); // Playwright's own handler doesn't exit
+const shutdown = async why => { console.log(`Stopped (${why})`); await Promise.all([...active.values()].map(r => r.stage.close())); process.exit(0); };
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => shutdown(sig)); // Playwright's own handler doesn't exit
+// desktop app: the window holds our stdin open. When the window process dies without quitting (killed, crashed, ended
+// by an AppArmor profile reload while the package is installed) the OS closes the pipe: stop instead of running on alone.
+if (process.env.ABR_EXIT_WITH_STDIN === '1') process.stdin.on('end', () => shutdown('window gone')).resume();
 
 const SYSTEM = `You are a web automation agent. The user watches the browser live.
 Use the Playwright browser tools to do the user's task, starting at the given URL.
@@ -348,7 +359,30 @@ function withRun(res, opts, body) {
   const queued = position => res.write(`event: queued\ndata: ${JSON.stringify({ position })}\n\n`);
   return slots.run(opts.locks ?? [], queued, left.signal, () => runOnStage(res, opts, body));
 }
-async function runOnStage(res, { kind, record, guide, label, project }, body) {
+// The project's instructions for videos and PDF guides (project form): one AI call, without browser tools, rewrites
+// the title, a description and each step's text (step.text). Any failure keeps the standard texts and is only logged.
+async function guideTexts(steps, entry, project, provider, runDir, send, signal) {
+  const instructions = readProject(project).guidePrompt;
+  const own = steps.filter(s => !s.section);
+  if (!instructions || !own.length || signal.aborted) return {};
+  provider ??= loadProviders().find(ready); // replays have no AI of their own
+  if (!provider) { send('log', 'Instructions for videos and PDF guides skipped: no AI provider is ready'); return {}; }
+  const { lang } = loadGuide();
+  send('log', 'Rewriting the video and PDF texts with the project instructions');
+  try {
+    const mcpConfigPath = join(runDir, 'rewrite-mcp.json');
+    writeFileSync(mcpConfigPath, '{"mcpServers":{}}');
+    const ask = async (prompt, system) => (await engines[provider.engine]({ provider, model: provider.model, prompt, system, mcpConfigPath, cwd: runDir }, () => {}, AbortSignal.any([signal, AbortSignal.timeout(120_000)]))).text;
+    const out = await rewriteGuide({ title: runTitle(entry, guideLabels(lang).suite), steps: own.map(s => translateStep(s.what, lang)), lang, instructions }, ask);
+    own.forEach((s, i) => { s.text = out.steps[i]; });
+    return { title: out.title, description: out.description };
+  } catch (e) {
+    send('log', `Instructions for videos and PDF guides skipped: ${e.message}`);
+    return {};
+  }
+}
+
+async function runOnStage(res, { kind, record, guide, label, project, provider }, body) {
   const send = (type, data) => { if (!res.destroyed) res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`); };
   const abort = new AbortController();
   res.on('close', () => abort.abort()); // tab closed
@@ -402,21 +436,22 @@ async function runOnStage(res, { kind, record, guide, label, project }, body) {
     }
     stopBoxes?.(); stopIssues();
     const done = steps?.finish();
+    const texts = done ? await guideTexts(done, entry, project, provider, runDir, send, abort.signal) : {};
     if (recorder) {
       const err = await recorder.stop(); // saved even when the run failed or was stopped: that's when you need it most
       if (err) send('fail', `Recording failed: ${err}`);
       else {
         const meta = readProject(project), { lang, accent } = loadGuide();
         let n = 0;
-        const captions = done.filter(s => !s.section).map(s => ({ n: ++n, at: s.at, text: translateStep(s.what, lang), zoom: s.box?.zoom, hold: entersValue(s.what) })).filter(c => c.at !== undefined);
-        const cardErr = await finishVideo(join(recordingsDir, video), { ...rec, title: runTitle(entry, guideLabels(lang).suite), app: meta.app || meta.name, logo: projectLogoDataUrl(project) || logoDataUrl(), accent, captions });
+        const captions = done.filter(s => !s.section).map(s => ({ n: ++n, at: s.at, text: s.text ?? translateStep(s.what, lang), zoom: s.box?.zoom, hold: entersValue(s.what) })).filter(c => c.at !== undefined);
+        const cardErr = await finishVideo(join(recordingsDir, video), { ...rec, title: texts.title || runTitle(entry, guideLabels(lang).suite), app: meta.app || meta.name, logo: projectLogoDataUrl(project) || logoDataUrl(), accent, captions });
         if (cardErr) send('log', `Title card and captions skipped: ${cardErr}`);
         entry.video = video; send('video', `/recordings/${video}`);
       }
     }
     if (guide) {
       const name = `${stamp(started)}-${label}-${tag}.pdf`;
-      try { await buildGuidePdf(entry, done, join(guidesDir, name), { ...loadGuide(), logo: projectLogoDataUrl(project) || logoDataUrl() }); entry.guide = name; entry.guideDoc = true; send('guide', `/guides/${name}`); }
+      try { await buildGuidePdf(entry, done, join(guidesDir, name), { ...loadGuide(), logo: projectLogoDataUrl(project) || logoDataUrl() }, texts); entry.guide = name; entry.guideDoc = true; send('guide', `/guides/${name}`); }
       catch (e) { send('fail', `PDF guide failed: ${e.message}`); }
     }
     addRun(entry);
@@ -427,13 +462,15 @@ async function runOnStage(res, { kind, record, guide, label, project }, body) {
   }
 }
 
-function aiRun(res, { project, url, title, task, provider, model, record, guide, session, flow, env, expected }) {
-  return withRun(res, { kind: 'ai', record, guide, label: provider.id, project, locks: dbLock(project, env) }, async ({ send, signal, entry, rec, runDir, stage, startRecording, addGuideStep }) => {
-    Object.assign(entry, { url, title: title || undefined, task, provider: provider.label, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, steps: [] });
+function aiRun(res, { project, url, title, task, provider, model, record, guide, session, flow, env, expected, files = [], prompt }) {
+  return withRun(res, { kind: 'ai', record, guide, label: provider.id, project, provider, locks: dbLock(project, env) }, async ({ send, signal, entry, rec, runDir, stage, startRecording, addGuideStep }) => {
+    Object.assign(entry, { url, title: title || undefined, task, prompt: prompt || undefined, provider: provider.label, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, ...(files.length && { files }), steps: [] });
     await resetDatabase(project, env, line => send('text', line));
     const startUrl = makeResolver({ vars: env.vars }).fill(url); // {{baseUrl}} in the URL field
     const sessionData = session ? JSON.parse(readFileSync(pickSession(project, session), 'utf8')) : null;
-    const mcp = mcpFor(runDir, await stage.ownBrowser(rec, sessionData), env, project);
+    const runFiles = join(runDir, 'mcp', 'files');
+    copyUploads(uploadsDir, files, runFiles); // checked by pickUploads just before the run
+    const mcp = mcpFor(runDir, await stage.ownBrowser(rec, sessionData), env, project, filesIn(runFiles));
     startRecording();
     const secrets = projectSecrets(project);
     const envVarNames = Object.keys(env.vars);
@@ -442,6 +479,7 @@ function aiRun(res, { project, url, title, task, provider, model, record, guide,
       envVarNames.length && `Environment "${env.name}" values you can use: ${envVarNames.map(n => /^https?:\/\//.test(env.vars[n]) ? `{{${n}}} (= ${env.vars[n]})` : `{{${n}}}`).join(', ')}. Built-in values: {{today}}, {{today+N}}, {{today-N}}, {{now}}, {{random}}.`,
       sessionData && `The browser starts with a saved login session ("${session}"), so you may already be logged in.`,
       secrets.length && `Available secrets: ${secrets.map(n => `{{${n}}}`).join(', ')}`,
+      files.length && `Files you can upload (use these exact values as the file paths, also in the test: setInputFiles('{{file.<name>}}')): ${files.map(f => `{{file.${f.name}}}`).join(', ')}`,
       flow && `The user recorded this flow with Playwright codegen. Use it as the route map: go through the same pages and use the same elements (the locators tell you which), so you do not need to explore. Adapt if something on screen differs, and verify the outcome yourself.\n\`\`\`ts\n${flowScript(flow)}\n\`\`\``,
       `Task:\n${task}`,
       expected && `Expected result (check it yourself on screen after the task):\n${expected}\n\nRight after the RESULT line, write exactly "EXPECTED: MET" or "EXPECTED: NOT MET", then what you actually saw. RESULT is SUCCESS only if the expected result is met. The test you write must assert this expected result.`,
@@ -453,17 +491,20 @@ function aiRun(res, { project, url, title, task, provider, model, record, guide,
     const { text } = await engines[provider.engine]({
       provider, model: model || provider.model, prompt, system: SYSTEM, ...mcp, cwd: dir, codebase: codebaseOf(project),
     }, emit, signal);
-    const { evidence, script } = splitAnswer(text);
+    let { evidence, script } = splitAnswer(text), scriptFrom;
+    // no test in the answer (a task with its own report format, say): one from the code the browser actually ran
+    const ran = script ? [] : readRanCode(runDir);
+    if (ran.length) { script = scriptFromCode(title || task.split('\n')[0], ran); scriptFrom = 'browser'; }
     // with an expectation, both the task and the expectation must hold; the AI's word alone is not enough
     const met = expected ? expectedVerdict(text) : null;
     const ok = /RESULT:\s*SUCCESS/.test(text) && (!expected || met === true);
-    Object.assign(entry, { status: ok ? 'pass' : 'fail', text, evidence, script, ...(expected && { expectedMet: met }) });
+    Object.assign(entry, { status: ok ? 'pass' : 'fail', text, evidence, script, ...(scriptFrom && { scriptFrom }), ...(expected && { expectedMet: met }) });
     send('done', { ok, text, steps: entry.steps.length, secs: Math.round((Date.now() - entry.started) / 1000) });
   });
 }
 
 // Plays test files in the runner's browser, streamed to the stage. Shared by replays and fix verification.
-async function playTests(files, { project, rec, session, storageFile, testDir, testDataDir, vars, envName, dbUrl, repeatEach, dataRows, updateSnapshots }, { send, signal, entry, mask, startRecording, addGuideStep, runDir, stage }) {
+async function playTests(files, { project, rec, session, storageFile, testDir, testDataDir, testFilesDir, vars, envName, dbUrl, repeatEach, dataRows, updateSnapshots }, { send, signal, entry, mask, startRecording, addGuideStep, runDir, stage }) {
   const cdpPort = await stage.reservePort(); // this run's runner browser; the live view attaches to it
   const runnerDone = new AbortController(); // stop waiting for the browser if the runner ends first (e.g. a compile error)
   const watchSignal = AbortSignal.any([signal, runnerDone.signal]);
@@ -476,7 +517,7 @@ async function playTests(files, { project, rec, session, storageFile, testDir, t
     if (step && entry.replaySteps.length < 500) { entry.replaySteps.push(step); send('step', step); }
   };
   let result;
-  try { result = await runTests(files, { ...rec, cdpPort, outputDir: join(runDir, `replay-${Date.now()}`), sessionFile: storageFile ?? pickSession(project, session), secrets: projectSecrets(project), apiKeyEnvs: loadProviders().map(pr => pr.apiKeyEnv).filter(Boolean), testDir, testDataDir, dbUrl, vars, envName, repeatEach, dataRows, updateSnapshots }, { onLine, onStep }, signal); }
+  try { result = await runTests(files, { ...rec, cdpPort, outputDir: join(runDir, `replay-${Date.now()}`), sessionFile: storageFile ?? pickSession(project, session), secrets: projectSecrets(project), apiKeyEnvs: loadProviders().map(pr => pr.apiKeyEnv).filter(Boolean), testDir, testDataDir, testFilesDir, dbUrl, vars, envName, repeatEach, dataRows, updateSnapshots }, { onLine, onStep }, signal); }
   finally { runnerDone.abort(); await watching; stage.releasePort(cdpPort); } // a workflow may replay many tests in one run
   keepErrorContext(result.tests, entry.log);
   keepVisualDiffs(result.tests, entry.id);
@@ -539,7 +580,10 @@ function fixRun(res, { run, name, provider, model, env }) {
     Object.assign(entry, { task: `Fix test: ${name}`, testNames: [name], fixOf: run.id, provider: provider.label, model: model || provider.model || '', session: run.session, env: env.name || undefined, original, steps: [] });
     await resetDatabase(project, env, line => send('text', line));
     const sessionData = run.session ? JSON.parse(readFileSync(pickSession(project, run.session), 'utf8')) : null;
-    const mcp = mcpFor(runDir, await stage.ownBrowser(rec, sessionData), env, project);
+    const runFiles = join(runDir, 'mcp', 'files');
+    const own = filesIn(testFilesDir(project, name));
+    for (const [n, path] of Object.entries(own)) { mkdirSync(runFiles, { recursive: true }); copyFileSync(path, join(runFiles, n)); }
+    const mcp = mcpFor(runDir, await stage.ownBrowser(rec, sessionData), env, project, filesIn(runFiles));
 
     const firstUrl = makeResolver({ vars: env.vars }).fill(withPlaceholders(original).match(/goto\(\s*(['"`])(.*?)\1/)?.[2] ?? '/');
     const url = /^https?:/.test(firstUrl) ? firstUrl : new URL(firstUrl, env.vars.baseUrl || process.env.BASE_URL || 'http://localhost').href;
@@ -547,6 +591,7 @@ function fixRun(res, { run, name, provider, model, env }) {
     const prompt = [
       `URL: ${url}`,
       projectSecrets(project).length && `Available secrets: ${projectSecrets(project).map(n => `{{${n}}}`).join(', ')}`,
+      Object.keys(own).length && `Files the test uploads (use these exact values as the file paths): ${Object.keys(own).map(n => `{{file.${n}}}`).join(', ')}`,
       `Task: a saved Playwright test fails. Repair it.\n\nThe test file tests/${project}/${name}.spec.ts:\n\`\`\`ts\n${withPlaceholders(original)}\n\`\`\``,
       `It failed with:\n${failed.error ?? 'unknown error'}`,
       failed.context && `Page state at the moment it failed (accessibility snapshot):\n${failed.context}`,
@@ -574,7 +619,7 @@ function fixRun(res, { run, name, provider, model, env }) {
     // same script, but its helper import must point back to tests/support from here
     const support = relative(fixDir, join(testsDir, 'support', 'vars')).split('\\').join('/');
     writeFileSync(file, prepareScript(script, { urlVars: urlVars(), supportImport: support.startsWith('.') ? support : `./${support}` }));
-    const { tests, ok } = await playTests([file], { project, rec, session: run.session, testDir: fixDir, testDataDir: join(projectDir(project), 'data'), vars: env.vars, envName: env.name, dbUrl: projectDb(project, env.name)?.url }, ctx);
+    const { tests, ok } = await playTests([file], { project, rec, session: run.session, testDir: fixDir, testDataDir: join(projectDir(project), 'data'), testFilesDir: join(projectDir(project), 'files'), vars: env.vars, envName: env.name, dbUrl: projectDb(project, env.name)?.url }, ctx);
     Object.assign(entry, { status: ok ? 'pass' : 'fail', tests });
     send('done', { ok, tests, text, secs: Math.round((Date.now() - entry.started) / 1000) });
   });
@@ -588,7 +633,7 @@ const noProduction = url => {
 // One browser for the whole workflow, so a login or an open page carries over. A Saved Test block runs in the
 // test runner's browser with the same login; the next AI block reopens ours with the login it had last.
 function workflowRun(res, { project, wf, params, env, session, record, guide, provider, model }) {
-  return withRun(res, { kind: 'workflow', record, guide, label: `wf-${wf.id}`, project, locks: dbLock(project, env) }, async ctx => {
+  return withRun(res, { kind: 'workflow', record, guide, label: `wf-${wf.id}`, project, provider, locks: dbLock(project, env) }, async ctx => {
     const { send, signal, entry, rec, runDir, stage, mask, startRecording, addGuideStep } = ctx;
     Object.assign(entry, { task: `Workflow: ${wf.name}`, workflow: wf.id, params, env: env.name || undefined, session: session || undefined, provider: provider.label, model: model || provider.model || '', blocks: [], steps: [] });
     await resetDatabase(project, env, line => send('text', line));
@@ -764,6 +809,13 @@ const readBody = (req, limit = 500_000) => new Promise((resolve, reject) => {
   req.on('data', c => { body += c; if (body.length > limit) { reject(new Error('Request body too large')); req.destroy(); } });
   req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch { reject(new Error('Invalid JSON')); } });
 });
+// a file sent as the request body itself (not JSON), at most MAX_FILE
+const readRaw = req => new Promise((resolve, reject) => {
+  const parts = []; let size = 0, big = false;
+  req.on('data', c => { size += c.length; if (size > MAX_FILE) big = true; else parts.push(c); }); // keep reading so the client gets the 413 instead of a reset
+  req.on('end', () => (big ? reject(tooLarge()) : resolve(Buffer.concat(parts))));
+  req.on('error', reject);
+});
 const sse = res => res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
 const sendFile = (res, file, headers) => { if (!existsSync(file)) { res.writeHead(404); return res.end(); } res.writeHead(200, headers); return createReadStream(file).pipe(res); };
 
@@ -776,6 +828,14 @@ async function route(req, res) {
   if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-abr-folder': encodeURIComponent(join(dir, '..')), 'set-cookie': `abr_page=${pageToken}; HttpOnly; SameSite=Strict; Path=/` }); return res.end(readFileSync(join(dir, 'index.html'))); }
   const STATIC = { '/shared.mjs': 'text/javascript', '/app.js': 'text/javascript', '/studio.js': 'text/javascript', '/app.css': 'text/css' };
   if (STATIC[p]) { res.writeHead(200, { 'content-type': `${STATIC[p]}; charset=utf-8` }); return res.end(readFileSync(join(dir, p.slice(1)))); }
+  // the app's own fonts (app/fonts), so the page looks right offline
+  const fontMatch = p.match(/^\/fonts\/([a-z0-9-]+\.woff2)$/);
+  if (fontMatch) {
+    const file = join(dir, 'fonts', fontMatch[1]);
+    if (!existsSync(file)) { res.writeHead(404); return res.end(); }
+    res.writeHead(200, { 'content-type': 'font/woff2', 'cache-control': 'max-age=31536000, immutable' });
+    return res.end(readFileSync(file));
+  }
   if (!fromOurPage(req)) throw denied('Open the app from its own page (reload it after the app restarts)');
 
 
@@ -969,14 +1029,26 @@ async function route(req, res) {
   const project = q('project');
   const testMatch = p.match(/^\/tests\/([a-z0-9-]+)$/);
   const dataMatch = p.match(/^\/tests\/([a-z0-9-]+)\/data$/);
+  const filesMatch = p.match(/^\/tests\/([a-z0-9-]+)\/files(?:\/([^/]+))?$/);
+  if (filesMatch) {
+    projectDir(project);
+    const [, t, file] = filesMatch;
+    if (!existsSync(testPath(project, t))) throw denied(`Test "${t}" not found`, 404);
+    if (!file && m === 'GET') return json(res, listTestFiles(project, t));
+    if (!file && m === 'POST') return json(res, { name: saveTestFile(project, t, q('name'), await readRaw(req)) });
+    if (file && m === 'DELETE') { deleteTestFile(project, t, decodeURIComponent(file)); res.writeHead(204); return res.end(); }
+  }
+  if (p === '/uploads' && m === 'POST') return json(res, saveUpload(uploadsDir, q('name'), await readRaw(req)));
   if (p === '/tests' || testMatch || dataMatch) projectDir(project);
   if (p === '/tests' && m === 'GET') return json(res, listTests(project));
   if (p === '/tests' && m === 'POST') {
     const { name, runId, code, overwrite } = await readBody(req);
-    let script = code;
-    if (runId) { const run = getRun(runId); runOr404(run); script = run.script; }
+    let script = code, run;
+    if (runId) { run = getRun(runId); runOr404(run); script = run.script; }
     if (!script) throw new Error('This run has no test script');
-    return json(res, { name: saveTest(project, slug(name), script, overwrite, { urlVars: urlVars() }) });
+    const saved = saveTest(project, slug(name), script, overwrite, { urlVars: urlVars() });
+    const missing = run?.files?.length ? copyUploads(uploadsDir, run.files, testFilesDir(project, saved)) : [];
+    return json(res, { name: saved, ...(missing.length && { missingFiles: missing }) });
   }
   if (testMatch && m === 'GET') { const code = readTest(project, testMatch[1]); res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); return res.end(code); }
   if (testMatch && m === 'PUT') { // edited in the app: script and data set
@@ -998,6 +1070,15 @@ async function route(req, res) {
     return json(res, { id: saveWorkflow(project, wfMatch?.[1], wf) });
   }
   if (wfMatch && m === 'DELETE') { deleteWorkflow(project, wfMatch[1]); res.writeHead(204); return res.end(); }
+
+  /* ----- saved prompts of one project (prompts.mjs) ----- */
+  const prMatch = p.match(/^\/prompts\/([a-z0-9-]+)(\/use)?$/);
+  if (p === '/prompts' || prMatch) projectDir(project);
+  if (p === '/prompts' && m === 'GET') return json(res, listPrompts(project));
+  if (prMatch && !prMatch[2] && m === 'GET') return json(res, readPrompt(project, prMatch[1]));
+  if ((p === '/prompts' && m === 'POST') || (prMatch && !prMatch[2] && m === 'PUT')) return json(res, { id: savePrompt(project, prMatch?.[1], await readBody(req), uploadsDir) });
+  if (prMatch && !prMatch[2] && m === 'DELETE') { deletePrompt(project, prMatch[1]); res.writeHead(204); return res.end(); }
+  if (prMatch?.[2] && m === 'POST') return json(res, usePromptFiles(project, prMatch[1], uploadsDir));
 
   /* ----- history ----- */
   if (p === '/history') { projectDir(project); return json(res, listRuns(project)); }
@@ -1108,8 +1189,9 @@ async function route(req, res) {
       if (!/^https?:\/\//.test(makeResolver({ vars: env.vars }).fill(url)) || !task.trim()) throw new Error('A URL (http/https, or {{baseUrl}}/...) and instructions are required');
       noProduction(makeResolver({ vars: env.vars }).fill(url));
       const flow = q('flow'); if (flow) flowScript(flow); // validates before streaming
+      const files = pickUploads(uploadsDir, q('files'));
       sse(res);
-      return aiRun(res, { project, url, title: q('title').trim().slice(0, 100), task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim() });
+      return aiRun(res, { project, files, url, title: q('title').trim().slice(0, 100), task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim(), prompt: promptExists(project, q('prompt')) ? q('prompt') : undefined });
     }
     const names = q('tests').split(',').filter(Boolean);
     if (!names.length) throw new Error('Select at least one test');
@@ -1140,7 +1222,7 @@ function importProject({ project, secrets, files }, mode) {
   if (mode === 'overwrite' && existsSync(dir)) for (const f of readdirSync(dir)) if (f !== 'project.json') rmSync(join(dir, f), { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const { created, codebase } = existsSync(join(dir, 'project.json')) ? JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')) : {};
-  writeFileSync(join(dir, 'project.json'), JSON.stringify({ name, description: project.description ?? '', url: project.url ?? '', app: project.app ?? '', env: envNames.has(project.env) ? project.env : '', ...(Object.keys(db).length && { db }), ...(codebase && { codebase }), created: created ?? Date.now() }, null, 2) + '\n');
+  writeFileSync(join(dir, 'project.json'), JSON.stringify({ name, description: project.description ?? '', url: project.url ?? '', app: project.app ?? '', guidePrompt: project.guidePrompt ?? '', env: envNames.has(project.env) ? project.env : '', ...(Object.keys(db).length && { db }), ...(codebase && { codebase }), created: created ?? Date.now() }, null, 2) + '\n');
   for (const f of files) { mkdirSync(join(dir, f.path, '..'), { recursive: true }); writeFileSync(join(dir, f.path), f.data); }
   // never bind secrets by itself: an imported workflow could send them anywhere. The user ticks them in Settings.
   const have = new Set(secretNames());

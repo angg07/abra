@@ -44,3 +44,17 @@ test('a secret NAME_<ENV> wins in that environment only', () => {
   assert.equal(makeResolver({ secrets }).fill('{{APP_DB}}'), 'live');
   assert.equal(core.pickSecret({ A_STAGING_EU: 'x', A: 'y' }, 'A', 'staging-eu'), 'x'); // env names become NAME_STAGING_EU
 });
+
+test('{{file.X}} is the path of the test file named X (names may hold dots)', () => {
+  const { fill } = makeResolver({ files: { 'template-klaim.xlsx': '/p/files/claim/template-klaim.xlsx' } });
+  assert.equal(fill('{{file.template-klaim.xlsx}}'), '/p/files/claim/template-klaim.xlsx');
+  assert.throws(() => fill('{{file.other.pdf}}'), /^Error: File \{\{file\.other\.pdf\}\} not found: add it in Edit test › Files$/);
+  assert.throws(() => makeResolver().fill('{{file.a.pdf}}'), /not found: add it in Edit test › Files/);
+});
+
+test('maskWith hides file paths (raw and JSON-escaped) before secrets, and other secrets still', () => {
+  const p = 'C:\\Users\\ann\\run\\mcp\\files\\a.xlsx';
+  const files = [['a.xlsx', p]], secrets = [['PASS', 'ann1'], ['TOKEN', 'zzzz9']];
+  const text = `raw ${p} json ${JSON.stringify(p).slice(1, -1)} tok zzzz9 user ann1`;
+  assert.equal(core.maskWith(text, { files, secrets }), 'raw {{file.a.xlsx}} json {{file.a.xlsx}} tok {{TOKEN}} user {{PASS}}');
+});

@@ -28,16 +28,17 @@ export const listProjects = () => (existsSync(testsDir) ? readdirSync(testsDir, 
 // db: the application's database per environment, already validated by the server (passwords live in .env)
 // codebase: the application's source folders on this computer (e.g. frontend and backend; the AI may read them),
 // a list or one path per line; never exported
-export function saveProject(id, { name, description = '', url = '', env = '', app = '', codebase = [], db } = {}) {
-  name = String(name ?? '').trim(); description = String(description).trim(); url = String(url).trim(); app = String(app).trim();
+export function saveProject(id, { name, description = '', url = '', env = '', app = '', guidePrompt = '', codebase = [], db } = {}) {
+  name = String(name ?? '').trim(); description = String(description).trim(); url = String(url).trim(); app = String(app).trim(); guidePrompt = String(guidePrompt).trim();
   codebase = [...new Set((Array.isArray(codebase) ? codebase : String(codebase).split('\n')).map(f => String(f).trim()).filter(Boolean))];
   if (codebase.length > 10) throw new Error('Codebase folders: at most 10');
   for (const f of codebase) if (!isAbsolute(f) || !existsSync(f) || !statSync(f).isDirectory()) throw new Error(`Codebase folder "${f}": a full path to an existing folder`);
   if (!name || name.length > 60) throw new Error('Project name: 1 to 60 characters');
   if (app.length > 60) throw new Error('Application name: at most 60 characters');
   if (description.length > 300) throw new Error('Description: at most 300 characters');
+  if (guidePrompt.length > 2000) throw new Error('Instructions for videos and PDF guides: at most 2000 characters');
   if (url && !/^(https?:\/\/|\{\{)\S+$/.test(url)) throw new Error('Start URL must start with http(s):// or {{');
-  const meta = { name, description, url, env: String(env), app, codebase, ...(db && { db }) };
+  const meta = { name, description, url, env: String(env), app, guidePrompt, codebase, ...(db && { db }) };
   if (id) { const { id: _, ...old } = readProject(id); writeFileSync(metaOf(id), JSON.stringify({ ...old, ...meta }, null, 2) + '\n'); return id; }
   const newId = slug(name).slice(0, 40).replace(/-+$/, '');
   if (!newId || RESERVED.has(newId)) throw new Error('Choose another project name');
@@ -126,11 +127,12 @@ export function saveTest(project, name, code, overwrite = false, opts = {}) {
   return name;
 }
 
-// the test, its data set and its visual baselines (<name>.spec.ts-snapshots/)
+// the test, its data set, its upload files and its visual baselines (<name>.spec.ts-snapshots/)
 export function deleteTest(project, name) {
   const file = fileOf(project, name);
   unlinkSync(file);
   rmSync(dataOf(project, name), { force: true });
+  rmSync(join(dirname(file), 'files', name), { recursive: true, force: true }); // its upload files (test-files.mjs)
   rmSync(`${file}-snapshots`, { recursive: true, force: true });
 }
 

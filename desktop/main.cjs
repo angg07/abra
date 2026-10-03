@@ -65,8 +65,9 @@ async function startServer() {
   const log = fs.openSync(logFile(), 'a');
   if (!fs.existsSync(path.join(home, '.env'))) fs.writeFileSync(path.join(home, '.env'), '# API keys and secrets, written by the app (Settings). Keep this file private.\n');
   server = spawn(nodeBin, [path.join(home, 'app', 'server.mjs')], {
-    cwd: home, windowsHide: true, stdio: ['ignore', log, log],
-    env: { ...process.env, PORT: String(port), ABR_PORTABLE: '1', ABR_DESKTOP: '1', ABR_VERSION: app.getVersion() },
+    // stdin: a pipe nobody writes to; the server stops when it closes, i.e. when this process is gone however it went
+    cwd: home, windowsHide: true, stdio: ['pipe', log, log],
+    env: { ...process.env, PORT: String(port), ABR_PORTABLE: '1', ABR_DESKTOP: '1', ABR_EXIT_WITH_STDIN: '1', ABR_VERSION: app.getVersion() },
   });
   const exited = new Promise(resolve => server.on('exit', code => resolve(code ?? 1)));
   server.on('error', e => showError('The app could not start', e.message));
@@ -90,7 +91,7 @@ function stopServer() {
 function createWindow() {
   win = new BrowserWindow({
     width: 1440, height: 900, minWidth: 900, minHeight: 600, show: false, title: 'ABRA',
-    backgroundColor: '#F4F6F8', autoHideMenuBar: true,
+    backgroundColor: '#0B0D10', autoHideMenuBar: true,
     ...(process.platform === 'linux' && { icon: path.join(__dirname, 'build', 'icon.png') }),
     webPreferences: { contextIsolation: true, sandbox: true },
   });
@@ -121,6 +122,17 @@ function createWindow() {
 const RELEASES = 'https://github.com/angg07/abra/releases/latest';
 const newer = (a, b) => { const [x, y] = [a, b].map(v => v.replace(/^v/, '').split('.').map(Number)); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return (x[i] || 0) > (y[i] || 0); return false; };
 const logUpdate = msg => { try { fs.appendFileSync(logFile(), `${new Date().toISOString()} update: ${msg}\n`); } catch {} };
+// deb: dpkg runs as root through pkexec. Started by the app, it sits in the app's systemd scope; the package
+// reloads the app's AppArmor profile, the app ends, systemd kills the rest of the scope and dpkg stops halfway,
+// leaving a package that will not start (seen on 1.1.2 -> 1.1.3). So it runs in a scope of its own.
+// Without systemd, electron-updater installs it as before.
+const debInstall = process.platform === 'linux' && !process.env.APPIMAGE && spawnSync('systemd-run', ['--version'], { timeout: 3000 }).status === 0;
+let pendingDeb = null;
+function installDeb(file, reopen) {
+  const cmd = `pkexec dpkg -i "$1"${reopen ? ' && exec /usr/bin/abra' : ''}`;
+  spawn('systemd-run', ['--user', '--scope', '--collect', '--quiet', '/bin/sh', '-c', cmd, 'sh', file], { detached: true, stdio: 'ignore' }).unref();
+  logUpdate(`installing ${path.basename(file)} in its own scope`);
+}
 async function checkUpdates() {
   try {
     if (process.platform === 'darwin') {
@@ -133,9 +145,13 @@ async function checkUpdates() {
     }
     const { autoUpdater } = require('electron-updater');
     autoUpdater.logger = { info: logUpdate, warn: logUpdate, error: logUpdate, debug: () => {} };
+    if (debInstall) autoUpdater.autoInstallOnAppQuit = false; // installDeb does it, at quit (will-quit below)
     if (!autoUpdater.listenerCount('update-downloaded')) autoUpdater.on('update-downloaded', async info => {
+      if (debInstall) pendingDeb = info.downloadedFile;
       const choice = await dialog.showMessageBox(win, { type: 'info', buttons: ['Restart now', 'Later'], defaultId: 0, cancelId: 1, message: `ABRA ${info.version} is ready`, detail: 'Restart to use it, or keep working: it installs when you close the app. Your projects and history stay.' });
-      if (choice.response === 0) autoUpdater.quitAndInstall();
+      if (choice.response !== 0) return;
+      if (!debInstall) return autoUpdater.quitAndInstall();
+      installDeb(info.downloadedFile, true); pendingDeb = null; app.quit();
     });
     await autoUpdater.checkForUpdates();
   } catch (e) { logUpdate(e.message); } // offline or GitHub down: try again later
@@ -143,7 +159,7 @@ async function checkUpdates() {
 
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 app.on('window-all-closed', () => app.quit()); // on macOS too: the app is its window
-app.on('will-quit', stopServer);
+app.on('will-quit', () => { stopServer(); if (pendingDeb) installDeb(pendingDeb, false); });
 
 app.whenReady().then(async () => {
   createWindow();

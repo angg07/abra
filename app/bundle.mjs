@@ -15,6 +15,9 @@ const ALLOWED = [
   { re: new RegExp(`^workflows/${SEG}\\.json$`), kind: 'text' },
   { re: new RegExp(`^${SEG}\\.spec\\.ts-snapshots/${SEG}\\.png$`), kind: 'base64' },
   { re: /^logo\.(png|jpg)$/, kind: 'base64' }, // the project's logo (title card, PDF cover)
+  { re: new RegExp(`^files/${SEG}/${SEG}$`), kind: 'base64' }, // a test's upload files (test-files.mjs)
+  { re: new RegExp(`^prompts/${SEG}\\.json$`), kind: 'text' }, // a saved Run AI prompt (prompts.mjs)
+  { re: new RegExp(`^prompt-files/${SEG}/${SEG}$`), kind: 'base64' }, // the files a saved prompt uploads
 ];
 const kindOf = path => (path.includes('..') ? undefined : ALLOWED.find(a => a.re.test(path))?.kind);
 
@@ -42,6 +45,7 @@ export function unpackBundle(b) {
   if (typeof project.name !== 'string' || !project.name.trim() || project.name.trim().length > 60) throw new Error('The project name must be 1 to 60 characters');
   if (project.description !== undefined && (typeof project.description !== 'string' || project.description.length > 300)) throw new Error('The project description must be text of at most 300 characters');
   if (project.app !== undefined && (typeof project.app !== 'string' || project.app.length > 60)) throw new Error('The application name must be text of at most 60 characters');
+  if (project.guidePrompt !== undefined && (typeof project.guidePrompt !== 'string' || project.guidePrompt.length > 2000)) throw new Error('The instructions for videos and PDF guides must be text of at most 2000 characters');
   if (project.url && (typeof project.url !== 'string' || !/^(https?:\/\/|\{\{)\S+$/.test(project.url))) throw new Error('The project start URL must start with http(s):// or {{');
   const secrets = Array.isArray(b.secrets) ? b.secrets.filter(n => /^[A-Z][A-Z0-9_]{0,59}$/.test(n)) : [];
   if (!b.files || typeof b.files !== 'object') throw new Error('The file lists no files');
@@ -76,7 +80,7 @@ export function unpackAll(b) {
 
 // {{name}} values the imported files use that no environment on this laptop defines. Built-ins (vars-core)
 // and workflow/data references are filled in by the app itself; UPPERCASE names are secrets.
-const BUILT_IN = /^(today(\s*[+-]\s*\d+)?|now|random|runId|data\..+|params\..+|blocks\..+|item(\..+)?)$/;
+const BUILT_IN = /^(today(\s*[+-]\s*\d+)?|now|random|runId|data\..+|file\..+|params\..+|blocks\..+|item(\..+)?)$/;
 export function missingVars(files, envs) {
   const defined = new Set(envs.flatMap(e => Object.keys(e.vars ?? {})));
   const used = new Set();

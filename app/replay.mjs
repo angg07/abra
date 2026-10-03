@@ -46,7 +46,7 @@ function runnerEnv(secrets, apiKeyEnvs) {
 }
 
 // onStep gets each action from steps-reporter.cjs; onLine gets the rest of the runner output
-export function runTests(files, { cdpPort, outputDir, width, height, device, sessionFile, testDir, vars = {}, envName = '', repeatEach = 1, dataRows = 0, updateSnapshots = false, slowMo = 250, testDataDir, dbUrl, secrets = [], apiKeyEnvs = [] }, { onLine, onStep }, signal) {
+export function runTests(files, { cdpPort, outputDir, width, height, device, sessionFile, testDir, vars = {}, envName = '', repeatEach = 1, dataRows = 0, updateSnapshots = false, slowMo = 250, testDataDir, testFilesDir, dbUrl, secrets = [], apiKeyEnvs = [] }, { onLine, onStep }, signal) {
   const reportFile = `${outputDir}.json`; // next to the output folder: Playwright empties the folder itself when it starts
   return new Promise((resolve, reject) => {
     const { command, args: cli } = playwrightCli(root);
@@ -58,6 +58,7 @@ export function runTests(files, { cdpPort, outputDir, width, height, device, ses
         REPLAY_W: String(width), REPLAY_H: String(height), REPLAY_DEVICE: device ?? '', REPLAY_CDP_PORT: String(cdpPort), REPLAY_OUTPUT: outputDir,
         REPLAY_REPORT: reportFile, REPLAY_SLOWMO: String(slowMo), REPLAY_STORAGE: sessionFile ?? '', REPLAY_TESTDIR: testDir ?? '',
         E2E_VARS: JSON.stringify(vars), E2E_ENV: envName, E2E_DATA_DIR: testDataDir ?? '', // tests/support/vars.ts; empty = the data/ folder next to the test
+        E2E_FILES_DIR: testFilesDir ?? '', // tests/support/vars.ts; empty = the files/ folder next to the test
         E2E_DB_URL: dbUrl ?? '', // tests/support/db.ts: the project's database in this environment
       },
       stdio: ['ignore', 'pipe', 'pipe'],

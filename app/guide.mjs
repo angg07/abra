@@ -183,15 +183,40 @@ export function pruneGuideFrames(folder, doc) {
 // names of buttons, fields and menus (“Save”) come out bold, as a reader scans for them
 const boldNames = text => String(text ?? '').replace(/“([^”\n]+)”/g, '**“$1”**');
 
+/* ---------- the project's instructions for videos and PDF guides ---------- */
+// The AI rewrites only the words: the title, a short description and each step (same count, same order).
+// ask(prompt, system) → the AI's answer as text. Throws when the answer is unusable; the caller keeps the template texts.
+const REWRITE_SYSTEM = `You rewrite the texts of a step-by-step user guide (a PDF and the captions of a tutorial video) recorded from a browser run.
+Follow the project's instructions for wording, audience and terms. Keep the meaning, the order and the number of steps: one text per step.
+Keep the names of buttons, links and fields in “curly quotes”. Each step is one short instruction (at most 10 words), without a full stop.
+Answer with JSON only, in a \`\`\`json block: {"title": "...", "description": "one or two sentences", "steps": ["...", "..."]}`;
+
+export async function rewriteGuide({ title, steps, lang, instructions }, ask) {
+  const prompt = [
+    `Project instructions:\n${instructions}`,
+    `Language: ${lang === 'id' ? 'Indonesian' : 'English'}, unless the instructions say otherwise.`,
+    `Title: ${title}`,
+    `Steps (${steps.length}):\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`,
+  ].join('\n\n');
+  const answer = await ask(prompt, REWRITE_SYSTEM);
+  let out;
+  try { out = JSON.parse(answer.match(/```(?:json)?\s*\n([\s\S]*?)```/)?.[1] ?? answer); } catch { throw new Error('the AI did not answer with JSON'); }
+  const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : '');
+  if (!Array.isArray(out?.steps) || out.steps.length !== steps.length) throw new Error(`the AI did not return ${steps.length} steps`);
+  const rewritten = out.steps.map((s, i) => text(s, 300) || (() => { throw new Error(`the AI left step ${i + 1} empty`); })());
+  return { title: text(out.title, 200) || title, description: text(out.description, 1000), steps: rewritten };
+}
+
 // The first draft of the document, from the run's steps. Screenshots come as base64 in `frame`.
-export function guideDoc(run, steps, lang = 'en') {
+// A step's `text` (rewritten from the project's instructions) replaces its template text; texts: { title, description }
+export function guideDoc(run, steps, lang = 'en', texts = {}) {
   const L = guideLabels(lang);
   const blocks = steps.map(s => (s.section
     ? { type: 'section', text: s.section, level: s.level === 1 ? 1 : 2 }
-    : { type: 'step', text: boldNames(translateStep(s.what, lang)), ...(s.detail && { detail: s.detail }), ...(s.frame && { frame: s.frame }) }));
+    : { type: 'step', text: boldNames(s.text ?? translateStep(s.what, lang)), ...(s.detail && { detail: s.detail }), ...(s.frame && { frame: s.frame }) }));
   const appErrors = (run.issues ?? []).filter(isAppError);
   return {
-    version: 1, lang, title: runTitle(run, L.suite) || L.testRun, description: '',
+    version: 1, lang, title: texts.title || runTitle(run, L.suite) || L.testRun, description: texts.description ?? '',
     run: { kind: run.kind, url: run.url, started: run.started, status: run.status, expected: run.expected, expectedMet: run.expectedMet,
       task: run.kind === 'ai' && run.task?.includes('\n') ? run.task : undefined, evidence: run.evidence, errors: appErrors },
     blocks,
@@ -238,8 +263,8 @@ export function cleanGuideDoc(input, saved, frames = saved.blocks.map(b => b.fra
 }
 
 // Old signature: the run's steps → doc (saved next to the PDF) → PDF
-export async function buildGuidePdf(run, steps, file, branding = {}) {
-  const doc = saveGuideDoc(guideDoc(run, steps, branding.lang ?? 'en'), guideFolder(file));
+export async function buildGuidePdf(run, steps, file, branding = {}, texts = {}) {
+  const doc = saveGuideDoc(guideDoc(run, steps, branding.lang ?? 'en', texts), guideFolder(file));
   await renderGuidePdf(doc, guideFolder(file), file, branding);
 }
 export const guideFolder = pdf => pdf.replace(/\.pdf$/, '');
