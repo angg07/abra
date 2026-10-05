@@ -70,7 +70,8 @@ test('other', async ({ page }) => {
   const steps = page.locator('#steps');
 
   await page.locator('nav.views [data-view=tests]').click();
-  await page.locator(`#testList .item[data-name=slow] [data-act=run]`).click();
+  await page.locator(`#testList .item[data-name=slow] [data-act=menu]`).click(); // slow ran before: Run is in its menu
+  await page.locator(`#testList .item[data-name=slow] .menu [data-act=run]`).click();
   await steps.getByText('Slow one').waitFor({ timeout: 30_000 });
   await page.locator('nav.views [data-view=tests]').click();
   await page.locator(`#testList .item[data-name=other] [data-act=run]`).click();

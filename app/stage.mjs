@@ -132,6 +132,20 @@ const IDLE_CLOSE_MS = 5 * 60_000;
 // someone else (another run, a second copy of this app): never drive it.
 export const portAnswers = port => fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(700) }).then(() => true, () => false);
 
+// ffmpeg's command line for a run's video. 2 threads and a 10-frame lookahead: about 300 MB instead of ~700 MB at
+// 1080p30 (measured), same size and frame rate, still real time.
+export const ffmpegArgs = (file, { width, height, fps }) => [
+  '-loglevel', 'error', '-f', 'image2pipe', '-c:v', 'mjpeg', '-framerate', String(fps), '-i', '-',
+  // the screencast's JPEGs are full-range; browsers play H.264 as limited range, which would wash light greys
+  // (page backgrounds) out to white. out_range=tv keeps them as they look in the browser.
+  '-vf', `scale=${width}:${height}:out_range=tv,format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-threads', '2', '-rc-lookahead', '10',
+  '-pix_fmt', 'yuv420p', '-bsf:v', 'h264_metadata=video_full_range_flag=0', '-movflags', '+faststart', '-y', file,
+];
+
+// The screencast costs the browser a lot of CPU (JPEG frames): run it only while someone watches the run, or the run
+// needs frames itself (its video, its PDF guide, a workflow's block screenshots).
+export const wantsScreencast = ({ viewers, needsFrames }) => viewers > 0 || needsFrames;
+
 export function createStage(ports) {
   const viewers = new Set();
   const last = {}; // replayed to viewers who connect mid-run
@@ -141,6 +155,14 @@ export function createStage(ports) {
   let context;  // our own browser (AI runs); kept open after a run so its login session can be saved
   let attached; // CDP connection to the test runner's browser (replays)
   let idleTimer;
+  let needsFrames = false; // set by the server: this run records a video, builds a PDF guide or is a workflow
+  let castSession = null, castOptions = null, casting = false; // the watched page's CDP session and its screencast
+  async function syncCast() {
+    const want = wantsScreencast({ viewers: viewers.size, needsFrames });
+    if (!castSession) return;
+    if (want && !casting) { casting = true; await castSession.send('Page.startScreencast', castOptions).catch(() => { casting = false; }); }
+    else if (!want && casting) { casting = false; delete last.frame; await castSession.send('Page.stopScreencast').catch(() => {}); }
+  }
 
   const send = (res, type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
   const broadcast = (type, data) => { last[type] = data; for (const res of viewers) send(res, type, data); };
@@ -154,6 +176,7 @@ export function createStage(ports) {
     for (const p of held) ports.give(p);
     held.clear();
     delete last.frame; // don't record/show the previous browser's last frame
+    castSession = null; casting = false;
   }
 
   function castPages(ctx, { width, height, highlight, a11y }) {
@@ -236,7 +259,8 @@ export function createStage(ports) {
         await s.send('Runtime.evaluate', { expression: HIGHLIGHT_SOURCE }).catch(() => {}); // page already loaded
       }
       page.on('close', () => { const rest = ctx.pages().filter(p => !p.isClosed()); if (rest.length) watch(rest.at(-1)).catch(() => {}); });
-      await s.send('Page.startScreencast', { format: 'jpeg', quality: 70, maxWidth: width, maxHeight: height });
+      castSession = s; casting = false; castOptions = { format: 'jpeg', quality: 70, maxWidth: width, maxHeight: height };
+      await syncCast(); // only while watched or needed
       broadcast('url', page.url());
     }
     ctx.on('page', p => watch(p).catch(() => {}));
@@ -244,7 +268,13 @@ export function createStage(ports) {
   }
 
   return {
-    addViewer(res) { viewers.add(res); for (const [type, data] of Object.entries(last)) send(res, type, data); res.on('close', () => viewers.delete(res)); },
+    addViewer(res) {
+      viewers.add(res);
+      for (const [type, data] of Object.entries(last)) send(res, type, data);
+      res.on('close', () => { viewers.delete(res); syncCast(); });
+      syncCast();
+    },
+    needFrames(on) { needsFrames = Boolean(on); syncCast(); },
     currentFrame: () => last.frame,
     onHighlight,
     onIssue(fn) { issueListeners.add(fn); return () => issueListeners.delete(fn); },
@@ -298,7 +328,7 @@ export function createStage(ports) {
     },
 
     async saveSession() {
-      if (!context) throw new Error('This run\'s browser is closed (it closes 5 minutes after the run). Run the AI again, then save its session.');
+      if (!context) throw new Error('This run\'s browser is closed (it closes 5 minutes after the run, or sooner when another run needs the memory). Run the AI again, then save its session.');
       return context.storageState();
     },
 
@@ -306,12 +336,7 @@ export function createStage(ports) {
     // (screencast only emits frames when the page changes). Needs ffmpeg with libx264 on PATH (or FFMPEG=/path).
     startRecording(file, { width, height, fps }) {
       mkdirSync(dirname(file), { recursive: true });
-      const ff = spawn(process.env.FFMPEG ?? 'ffmpeg', [
-        '-loglevel', 'error', '-f', 'image2pipe', '-c:v', 'mjpeg', '-framerate', String(fps), '-i', '-',
-        // the screencast's JPEGs are full-range; browsers play H.264 as limited range, which would wash light greys
-        // (page backgrounds) out to white. out_range=tv keeps them as they look in the browser.
-        '-vf', `scale=${width}:${height}:out_range=tv,format=yuv420p`, '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-bsf:v', 'h264_metadata=video_full_range_flag=0', '-movflags', '+faststart', '-y', file,
-      ], { stdio: ['pipe', 'ignore', 'pipe'] });
+      const ff = spawn(process.env.FFMPEG ?? 'ffmpeg', ffmpegArgs(file, { width, height, fps }), { stdio: ['pipe', 'ignore', 'pipe'] });
       let err = '', frames = 0;
       ff.stderr.on('data', d => { err += d; });
       ff.stdin.on('error', () => {}); // ffmpeg died; reported on stop

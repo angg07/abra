@@ -39,3 +39,24 @@ test('releasePort gives a runner port back to the pool at once, not when the run
   await s.close();
   assert.deepEqual(given, [9555]); // not given back twice
 });
+
+test('the screencast runs only while someone watches or the run needs frames', async () => {
+  const ports = createPortPool(9490, 9499, portAnswers);
+  const s = createStage(ports);
+  const watcher = () => { const closers = []; const got = []; return { got, leave: () => closers.forEach(fn => fn()), res: { write: c => got.push(String(c)), on: (ev, fn) => { if (ev === 'close') closers.push(fn); } } }; };
+  try {
+    await s.ownBrowser({ width: 640, height: 400, highlight: false, a11y: false }, null);
+    await new Promise(r => setTimeout(r, 1500));
+    assert.equal(s.currentFrame(), undefined); // nobody watches, nothing needs frames: no screencast
+    const a = watcher(), b = watcher();
+    s.addViewer(a.res); s.addViewer(b.res);
+    await until(() => s.currentFrame());
+    a.leave(); // one window leaves: the other still watches
+    await new Promise(r => setTimeout(r, 500));
+    assert.ok(s.currentFrame());
+    b.leave(); // nobody watches now
+    await until(() => s.currentFrame() === undefined);
+    s.needFrames(true); // e.g. recording a video: frames without a viewer
+    await until(() => s.currentFrame());
+  } finally { await s.close(); }
+});

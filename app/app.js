@@ -8,7 +8,7 @@ const store = {
   set(v) { try { localStorage.setItem('last', JSON.stringify({ ...store.get(), ...v })); } catch {} },
 };
 const saved = store.get();
-$('record').checked = saved.record ?? true; $('replayRecord').checked = saved.replayRecord ?? true;
+$('record').checked = saved.record ?? true; $('replayRecord').checked = saved.replayRecord ?? true; $('showBrowser').checked = saved.showBrowser ?? true; $('replayShowBrowser').checked = saved.replayShowBrowser ?? true;
 $('guide').checked = saved.guide ?? false; $('wfRecord').checked = saved.wfRecord ?? true; $('wfGuide').checked = saved.wfGuide ?? false; $('replayGuide').checked = saved.replayGuide ?? false; $('replayRepeat').value = saved.replayRepeat ?? '1';
 
 const api = async (path, opts = {}) => {
@@ -33,7 +33,7 @@ const ago = t => {
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return new Date(t).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
 };
-const STATUS = { pass: 'Passed', fail: 'Failed', stopped: 'Stopped', error: 'Error', blocked: 'Blocked' };
+const STATUS = { pass: 'Passed', fail: 'Failed', stopped: 'Stopped', error: 'Error', blocked: 'Blocked', interrupted: 'Interrupted' };
 const icon = name => `<svg class="i" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 // environments a run may use: production ones only feed the block list
 const testEnvs = () => (settings.environments ?? []).filter(e => !e.production);
@@ -77,40 +77,71 @@ async function route() {
     $('projectList').innerHTML = `<div class="emptybox"><strong>Projects could not be loaded</strong>${esc(err.message)}. Restart the app (npm run app) and reload this page.</div>`;
     return;
   }
+  const before = project?.id;
   project = projects.find(p => p.id === id) ?? null;
   if (id && !project) { location.hash = ''; return; }
+  if (project?.id !== before) $('summaries').replaceChildren(); // summary cards belong to the project they ran in (all results stay in History)
   $('projName').textContent = project?.name ?? 'All projects';
   applyRoles();
   if (project) enterProject(); else { renderHome(); show('home'); }
 }
 window.addEventListener('hashchange', route);
 
+// a status as a pill: Passed / Failed / a warning for runs cut short / Not run yet
+const statusPill = st => !st ? '<span class="pill idle">Not run yet</span>'
+  : `<span class="pill ${esc(st)}">${st === 'pass' ? icon('check') : ['fail', 'error', 'blocked'].includes(st) ? icon('x') : ''}${esc(STATUS[st] ?? st)}</span>`;
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+// Projects page numbers: this week's runs over every project, how many passed, projects whose last run failed, runs going now
+function projectStats(list, running) {
+  const runs = list.reduce((n, p) => n + (p.week?.runs ?? 0), 0), passed = list.reduce((n, p) => n + (p.week?.passed ?? 0), 0);
+  return { runs, passRate: runs ? Math.round(passed / runs * 100) : null, failing: list.filter(p => ['fail', 'error', 'blocked'].includes(p.last?.status)).length, running };
+}
 function renderHome() {
   document.title = 'ABRA';
-  const card = p => `<article class="project">
-      <button type="button" class="open" data-open="${esc(p.id)}">
-        <span class="name">${icon('folder')}${esc(p.name)}</span>
-        <span class="desc">${esc(p.description || 'No description')}</span>
-        ${p.url ? `<span class="url">${esc(p.url)}</span>` : ''}
-        <span class="facts">
-          <span><b>${p.tests.length}</b> test${p.tests.length === 1 ? '' : 's'}, <b>${p.runs}</b> run${p.runs === 1 ? '' : 's'}<br>${p.last ? `Last run ${esc(ago(p.last.started))}: ${esc(STATUS[p.last.status] ?? p.last.status)}` : 'Not run yet'}</span>
-          <span class="strip" aria-label="Last ${p.recent.length} runs">${[...p.recent].reverse().map(st => `<i class="${esc(st)}" title="${esc(STATUS[st] ?? st)}"></i>`).join('')}</span>
-        </span>
-      </button>
-      ${`<button type="button" class="icon-btn edit" data-edit="${esc(p.id)}" aria-label="Edit ${esc(p.name)}" title="Edit project">${icon('edit')}</button>`}
+  const s = projectStats(projects, liveRuns.size);
+  const stat = (num, cap, style = '') => `<div class="card stat"><span class="num"${style}>${num}</span><span class="cap">${cap}</span></div>`;
+  $('projStats').innerHTML = stat(s.runs, 'Runs this week') + stat(s.passRate === null ? '—' : `${s.passRate}%`, 'Passed')
+    + stat(s.failing, 'Failed, need a look', s.failing ? ' style="color:var(--fail)"' : '') + stat(s.running, 'Running now');
+  const card = p => {
+    const pass = p.recent.filter(st => st === 'pass').length, n = p.recent.length, rate = n ? Math.round(pass / n * 100) : null;
+    return `<article class="card project" data-id="${esc(p.id)}">
+      <div class="proj-top">
+        <span class="proj-ava" aria-hidden="true">${esc(p.name.slice(0, 2).toUpperCase())}</span>
+        <span class="proj-id"><span class="proj-name">${esc(p.name)}</span><span class="proj-url">${esc(p.url || p.description || 'No start URL')}</span></span>
+        ${statusPill(p.last?.status)}
+        <button type="button" class="icon-btn" data-edit="${esc(p.id)}" aria-label="Edit ${esc(p.name)}" title="Edit project">${icon('edit')}</button>
+      </div>
+      <div class="meter">
+        <div class="meter-top"><span>Pass rate · last ${plural(n, 'run')}</span><b>${rate === null ? '—' : `${rate}%`}</b></div>
+        <div class="bar" role="img" aria-label="${pass} passed, ${n - pass} not passed"><i class="p" style="width:${n ? pass / n * 100 : 0}%"></i><i class="f" style="width:${n ? (n - pass) / n * 100 : 0}%"></i></div>
+      </div>
+      <div class="tags-row"><span class="tag">${icon('tests')}${plural(p.tests.length, 'test')}</span><span class="tag">${icon('workflow')}${plural(p.workflows ?? 0, 'workflow')}</span><span class="tag">${icon('globe')}${esc(p.env || settings.activeEnv || 'No environment')}</span></div>
+      <div class="proj-foot">
+        <span class="hint grow">${p.last ? `Last run ${esc(ago(p.last.started))}` : 'No runs yet'}</span>
+        <button type="button" class="btn ghost small" data-open="${esc(p.id)}" data-to="tests">Open</button>
+        <button type="button" class="btn small" data-open="${esc(p.id)}" data-to="ai">${icon('sparkles')}Run AI</button>
+      </div>
     </article>`;
-  const demo = projects.length ? '' : `<article class="project new"><button type="button" class="open" data-demo>${icon('sparkles')}<strong>Try the demo</strong><span>A practice shop with 2 saved tests: press Run and watch</span></button></article>`;
-  $('projectList').innerHTML = projects.map(card).join('') + demo + `<article class="project new"><button type="button" class="open" data-new>${icon('plus')}<strong>New project</strong><span>For another application you test</span></button></article>`;
+  };
+  const demo = projects.length ? '' : `<button type="button" class="project new" data-demo><span class="ico">${icon('sparkles')}</span><b>Try the demo</b><span class="hint">A practice shop with 2 saved tests: press Run and watch</span></button>`;
+  $('projectList').innerHTML = projects.map(card).join('') + demo + `<button type="button" class="project new" data-new><span class="ico">${icon('plus')}</span><b>New project</b><span class="hint">Add another application to test</span></button>`;
   applyRoles();
 }
+let openTo = null; // the section a project card's Open / Run AI asked for
 $('projectList').onclick = e => {
   const b = e.target.closest('button'); if (!b) return;
-  if (b.dataset.open) location.hash = `#/p/${b.dataset.open}`;
+  if (b.dataset.open) { openTo = b.dataset.to; if (location.hash === `#/p/${b.dataset.open}`) route(); else location.hash = `#/p/${b.dataset.open}`; }
   if (b.dataset.edit) editProject(projects.find(p => p.id === b.dataset.edit));
   if ('new' in b.dataset) editProject(null);
   if ('demo' in b.dataset) api('/projects/demo', { method: 'POST' }).then(r => { toast('Demo ready: open Saved tests and press Run on a test'); location.hash = `#/p/${r.id}`; }, err => toast(`The demo could not be added: ${err.message}`));
 };
 $('newProject').onclick = () => editProject(null);
+// ⋯ on Projects: Export all / Import project
+const closeMore = () => { $('projMoreMenu').hidden = true; $('projMore').setAttribute('aria-expanded', 'false'); };
+$('projMore').onclick = e => { e.stopPropagation(); const open = $('projMoreMenu').hidden; $('projMoreMenu').hidden = !open; $('projMore').setAttribute('aria-expanded', String(open)); if (open) $('projMoreMenu').querySelector('button').focus(); };
+$('projMoreMenu').onclick = closeMore;
+document.addEventListener('click', e => { if (!$('projMoreMenu').hidden && !e.target.closest('#projMoreMenu')) closeMore(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('projMoreMenu').hidden) { closeMore(); $('projMore').focus(); } });
 
 // sidebar project switcher
 const closeMenu = () => { $('projMenu').hidden = true; $('projSwitch').setAttribute('aria-expanded', 'false'); };
@@ -150,7 +181,9 @@ async function enterProject() {
     const want = ps[sel.id] ?? project.env;
     sel.value = want && [...sel.options].some(o => o.value === want) ? want : settings.activeEnv || '';
   }
-  if (shownViews === shownAtStart) show('ai');
+  syncAiForm(); varChips();
+  const to = openTo ?? 'ai'; openTo = null;
+  if (shownViews === shownAtStart) show(to);
 }
 
 // New / edit project dialog
@@ -425,12 +458,20 @@ function show(view) {
   for (const b of document.querySelectorAll('.openSettings')) b.setAttribute('aria-current', view === 'settings' ? 'page' : 'false');
   if (!['settings', 'run', 'setup', 'guide'].includes(view)) lastPage = view;
   $('openSetup').setAttribute('aria-current', view === 'setup' ? 'page' : 'false');
+  if (view !== 'run' && live) { live.close(); live = null; } // not watching: the run's browser can stop its screencast
   if (view === 'tests') loadTests();
   if (view === 'ai') loadPrompts();
   if (view === 'history') loadHistory();
   if (view === 'workflows') loadWorkflows();
   $('scroll').scrollTop = 0; $('side').classList.remove('open');
+  syncHeadHeight();
 }
+// boxes that stay in view (Run settings, the Settings sections) stick just below the sticky page header, whatever its height
+function syncHeadHeight() {
+  const head = [...document.querySelectorAll('.page-head')].find(h => h.offsetParent);
+  if (head) $('scroll').style.setProperty('--head-h', `${head.offsetHeight + 16}px`);
+}
+addEventListener('resize', syncHeadHeight);
 // a run may go on while you look elsewhere; switching project waits for it
 // Projects: the hash may already be empty (no project open), then there is no hashchange to route on
 for (const b of document.querySelectorAll('nav.views button')) b.onclick = () => (b.dataset.view !== 'home' ? show(b.dataset.view) : location.hash ? (location.hash = '') : route());
@@ -645,15 +686,38 @@ async function loadSettings() {
     sel.value = testEnvs().some(e => e.name === cur) ? cur : settings.activeEnv || '';
     sel.closest('label').hidden = !testEnvs().length;
   }
-  const envVars = Object.keys(settings.environments.find(e => e.name === $('aiEnv').value)?.vars ?? {});
-  $('secretHint').innerHTML = [
-    project?.secrets?.length ? `Secrets: ${project.secrets.map(n => `<code>{{${esc(n)}}}</code>`).join(' ')}` : '',
-    envVars.length ? `Environment: ${envVars.map(n => `<code>{{${esc(n)}}}</code>`).join(' ')}` : '',
-    'Values: <code>{{today}}</code> <code>{{today+3}}</code> <code>{{random}}</code>',
-  ].filter(Boolean).join('<br>');
+  varChips(); syncRunSummary();
+}
+// Run AI: the values the instructions can use, as chips that type themselves at the cursor
+function varChips() {
+  const env = Object.keys(settings.environments?.find(e => e.name === $('aiEnv').value)?.vars ?? {});
+  const chip = (v, lock) => `<button type="button" class="var-chip" data-var="${esc(v)}"${lock ? ' title="Secret: the AI only sees the name"' : ''}>${lock ? icon('lock') : ''}${esc(v)}</button>`;
+  $('varChips').innerHTML = [...env.map(n => chip(`{{${n}}}`)), ...(project?.secrets ?? []).map(n => chip(`{{${n}}}`, true)), chip('{{today}}'), chip('{{random}}')].join('');
+}
+$('varChips').onclick = e => {
+  const b = e.target.closest('[data-var]'); if (!b) return;
+  const t = $('task'), s = t.selectionStart ?? t.value.length, end = t.selectionEnd ?? s;
+  const pre = t.value.slice(0, s), sep = pre && !/\s$/.test(pre) ? ' ' : '';
+  t.setRangeText(sep + b.dataset.var, s, end, 'end'); t.focus(); syncTaskCount();
+};
+const syncTaskCount = () => { $('taskCount').textContent = `${$('task').value.length} / 10000`; };
+$('task').addEventListener('input', syncTaskCount);
+// the three summary rows of Run settings; the full choices are under "Change settings"
+function syncRunSummary() {
+  const prov = $('provider').selectedOptions[0]?.textContent ?? 'No AI', model = $('model').value.trim() || $('model').placeholder;
+  $('sumAi').textContent = `${prov} · ${model}`;
+  $('sumEnv').textContent = $('aiEnv').value || 'None';
+  $('sumOut').textContent = [$('record').checked && 'Video', $('guide').checked && 'PDF guide', $('showBrowser').checked && 'Visible browser'].filter(Boolean).join(', ') || 'In the background, no video';
+}
+$('f').addEventListener('input', syncRunSummary); $('f').addEventListener('change', syncRunSummary);
+// after the form is filled by code (a project, a saved prompt, New prompt): counter, summary, and Title and files open when they hold something
+function syncAiForm() {
+  syncModelHint(); varChips(); syncTaskCount(); syncRunSummary();
+  $('filesMore').open = Boolean($('taskTitle').value.trim() || aiFiles.length);
 }
 boot();
-$('provider').onchange = () => { $('model').value = ''; $('model').placeholder = $('provider').selectedOptions[0].dataset.model || 'default'; };
+const syncModelHint = () => { $('model').placeholder = $('provider').selectedOptions[0]?.dataset.model || 'default'; }; // the chosen AI's default model
+$('provider').onchange = () => { $('model').value = ''; syncModelHint(); };
 
 /* ---------- running (AI or replay), shared ---------- */
 let current; // the run on the page: one in progress, or one opened from History
@@ -680,7 +744,7 @@ function showLive(run) {
   openRunPage(run.page);
   setRunButtons('running'); stageMode('live'); $('rec').hidden = run.params.record !== '1'; $('caption').hidden = true;
   if (run.addr) $('addr').textContent = run.addr;
-  if (liveOf !== run) startLive(run);
+  if (liveOf !== run || !live) startLive(run); // also after the stream was closed on another page
   run.lastNote = null;
   for (const fn of run.paints) fn();
   $('status').textContent = run.status[0]; $('status').className = 'pill ' + run.status[1];
@@ -741,8 +805,13 @@ function stageMode(mode, run) {
   $('addr').textContent = past ? run.url ?? '' : 'about:blank';
 }
 
-function start(kind, params) {
-  const run = current = viewing = { kind, params, doneMsg: null, page: pageMeta, origin, paints: [], status: ['', ''], issues: [], started: Date.now() };
+// the run page's heading for a run about to start; shown now unless the run goes on in the background
+const runPage = (meta, background) => { if (background) pageMeta = meta; else openRunPage(meta); };
+// background: the run goes on as a sidebar chip; the page on screen, the run page and the live view stay as they are
+// (paint() keeps every step for when the chip is clicked)
+function start(kind, params, { background = false } = {}) {
+  const run = { kind, params, doneMsg: null, page: pageMeta, origin, paints: [], status: ['', ''], issues: [], started: Date.now(), background };
+  if (!background) current = viewing = run;
   run.label = String(params.title || pageMeta.task || kind).split('\n')[0].slice(0, 60);
   run.chip = document.createElement('button');
   run.chip.type = 'button'; run.chip.className = 'live-chip'; run.chip.title = run.label;
@@ -750,20 +819,28 @@ function start(kind, params) {
   run.chip.onclick = () => showLive(run);
   $('liveChips').append(run.chip);
   liveRuns.add(run); syncRunning();
-  openRunPage(run.page); // a clean page (Run again reuses the one on screen)
-  stageMode('live');
-  setRunButtons('running');
-  $('rec').hidden = params.record !== '1'; $('caption').hidden = true;
+  if (!background) {
+    openRunPage(run.page); // a clean page (Run again reuses the one on screen)
+    stageMode('live');
+    setRunButtons('running');
+    $('rec').hidden = params.record !== '1'; $('caption').hidden = true;
+  }
   liveStatus(run, 'Running 0:00', 'run');
   run.timer = setInterval(() => liveStatus(run, `Running ${clock(run)}`, 'run'), 1000);
 
-  startLive(run); $('addr').textContent = 'about:blank'; // this run's own browser comes next
+  if (!background) { startLive(run); $('addr').textContent = 'about:blank'; } // this run's own browser comes next
   const es = run.es = new EventSource(`/${{ ai: 'run', replay: 'replay', fix: 'fix', workflow: 'workflow-run' }[kind]}?` + new URLSearchParams({ ...params, project: project.id }));
   paint(run, () => renderIssues(run.issues));
-  es.addEventListener('queued', e => { run.queued = true; clearInterval(run.timer); liveStatus(run, `Waiting for a free run slot (#${JSON.parse(e.data).position} in line)`, 'run'); });
+  es.addEventListener('queued', e => {
+    const q = JSON.parse(e.data), gb = mb => (mb / 1024).toFixed(1);
+    run.queued = true; clearInterval(run.timer);
+    liveStatus(run, q.reason === 'memory'
+      ? `Waiting for free memory: ${gb(q.freeMB)} GB free, a run needs ${gb(q.needMB)} GB. Close other apps or wait for the other run.`
+      : `Waiting for a free run slot (#${q.position} in line)`, 'run');
+  });
   es.addEventListener('run', e => {
     run.id = JSON.parse(e.data).id;
-    if (viewing === run) startLive(run);
+    if (viewing === run && !$('view-run').hidden) startLive(run); // a run that waited in line and starts while you are elsewhere: showLive opens it later
     if (run.queued) { run.queued = false; run.started = Date.now(); run.timer = setInterval(() => liveStatus(run, `Running ${clock(run)}`, 'run'), 1000); }
   });
   es.addEventListener('text', e => { const t = JSON.parse(e.data); paint(run, () => { run.lastNote = { el: addNote(t), text: t }; run.lastNote.el.scrollIntoView({ block: 'nearest' }); }); });
@@ -794,18 +871,53 @@ function start(kind, params) {
   });
   es.addEventListener('saved', async e => {
     const { id } = JSON.parse(e.data);
-    const shown = viewing === run;
+    const shown = viewing === run && !$('view-run').hidden; // peeked at through its chip and left: the card, not the hidden page
     finish(run);
     const saved = await api(`/history/${id}`);
     if (shown) renderResult(saved, { live: true });
-    else toast(`The run finished: ${STATUS[saved.status] ?? saved.status}. It is in History.`);
+    else showSummary(saved);
   });
   es.onerror = () => {
     if (!liveRuns.has(run)) return;
-    const shown = viewing === run;
+    const shown = viewing === run && !$('view-run').hidden; // peeked at through its chip and left: the card, not the hidden page
     finish(run);
-    if (shown) setStatus(run.doneMsg ?? 'Connection lost', 'fail'); else toast(`The run ended: ${run.doneMsg ?? 'connection lost'}`);
+    if (shown) setStatus(run.doneMsg ?? 'Connection lost', 'fail'); else showSummary({ status: { Passed: 'pass', Failed: 'fail', Stopped: 'stopped' }[run.doneMsg] ?? 'error', title: run.label, secs: Math.round((Date.now() - run.started) / 1000), error: run.doneMsg ? '' : 'Connection lost' });
   };
+}
+
+/* ---------- background runs: a summary card that stays until closed, plus a system notice when the window is away ---------- */
+function showSummary(r) {
+  const total = r.tests?.length ?? 0, passed = r.tests?.filter(t => t.status === 'passed').length ?? 0;
+  const appErrors = (r.issues ?? []).filter(isAppError).length;
+  const meta = [`${r.secs ?? 0} s`, ...(r.kind === 'replay' && total ? [`${passed} of ${total} tests passed`] : []), ...(appErrors ? [`${appErrors} app error${appErrors > 1 ? 's' : ''}`] : [])];
+  const head = { pass: '✓ Passed', fail: '✗ Failed' }[r.status] ?? STATUS[r.status] ?? r.status;
+  const firstError = r.error ?? r.tests?.find(t => t.status !== 'passed' && t.error)?.error; // a failing test keeps its message in tests[]
+  const card = document.createElement('div');
+  card.className = `summary ${r.status}`;
+  if (r.id) card.dataset.id = r.id;
+  card.innerHTML = `<div class="summary-head"><b>${esc(head)}</b><button type="button" class="icon-btn" data-act="close" aria-label="Close">${icon('x')}</button></div>
+    <div class="summary-name">${esc(r.title || r.task || '')}</div>
+    <div class="summary-meta">${esc(meta.join(' · '))}</div>
+    ${firstError ? `<div class="summary-error">${esc(String(firstError).split('\n')[0])}</div>` : ''}
+    ${r.id ? '<button type="button" class="btn small" data-act="open">Open result</button>' : ''}`;
+  card.onclick = async e => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    card.remove();
+    if (b.dataset.act === 'open') openPastRun(await api(`/history/${r.id}`), lastPage);
+  };
+  $('summaries').prepend(card);
+  while ($('summaries').children.length > 5) $('summaries').lastChild.remove();
+  notifySystem(r, () => card.querySelector('[data-act=open]')?.click());
+}
+function notifySystem(r, onClick) {
+  if (!document.hidden && document.hasFocus()) return; // you are looking: the card is enough
+  if (typeof Notification === 'undefined') return;
+  const go = () => {
+    const n = new Notification(`ABRA: ${STATUS[r.status] ?? r.status}`, { body: r.title || r.task || '' });
+    n.onclick = () => { window.focus(); onClick(); n.close(); };
+  };
+  if (Notification.permission === 'granted') go();
+  else if (Notification.permission !== 'denied') Notification.requestPermission().then(p => { if (p === 'granted') go(); }).catch(() => {});
 }
 
 function finish(run) {
@@ -849,13 +961,13 @@ function renderResult(run, { live = false } = {}) {
   setStatus(STATUS[status] ?? status, status === 'pass' ? 'pass' : status === 'stopped' ? '' : 'fail');
   const total = run.tests?.length ?? 0, passed = run.tests?.filter(t => t.status === 'passed').length ?? 0;
   const blocksDone = run.blocks ?? [], blocksOk = blocksDone.filter(b => b.status === 'pass').length;
-  const sub = run.kind === 'workflow' ? `${blocksOk} of ${blocksDone.length} blocks passed in ${run.secs} s`
-    : run.kind === 'ai' ? `${run.steps?.length ?? 0} steps in ${run.secs} s`
-    : run.kind === 'fix' ? `${run.steps?.length ?? 0} AI steps${total ? `, then ${passed} of ${total} passed without AI` : ''}, ${run.secs} s`
-    : `${passed} of ${total} tests passed in ${run.secs} s`;
+  const sub = run.kind === 'workflow' ? `${blocksOk} of ${blocksDone.length} blocks passed in ${run.secs ?? 0} s`
+    : run.kind === 'ai' ? `${run.steps?.length ?? 0} steps in ${run.secs ?? 0} s`
+    : run.kind === 'fix' ? `${run.steps?.length ?? 0} AI steps${total ? `, then ${passed} of ${total} passed without AI` : ''}, ${run.secs ?? 0} s`
+    : `${passed} of ${total} tests passed in ${run.secs ?? 0} s`;
   const title = run.kind === 'fix'
-    ? { pass: '✓ Fixed and verified', fail: run.script ? '✗ The corrected test still fails' : '✗ Could not fix this test', stopped: 'Stopped', error: 'The fix could not complete', blocked: '⛔ Blocked: production address' }[status]
-    : { pass: '✓ Passed', fail: '✗ Failed', stopped: 'Stopped', error: 'The run could not complete', blocked: '⛔ Blocked: production address' }[status];
+    ? { pass: '✓ Fixed and verified', fail: run.script ? '✗ The corrected test still fails' : '✗ Could not fix this test', stopped: 'Stopped', error: 'The fix could not complete', interrupted: 'Interrupted', blocked: '⛔ Blocked: production address' }[status]
+    : { pass: '✓ Passed', fail: '✗ Failed', stopped: 'Stopped', error: 'The run could not complete', interrupted: 'Interrupted', blocked: '⛔ Blocked: production address' }[status];
   r.className = 'result ' + status;
   r.innerHTML = `<h2>${esc(title)} <small>${esc(sub)}</small></h2>`;
   if (run.error) r.insertAdjacentHTML('beforeend', `<p class="evidence">${esc(run.error)}</p>`);
@@ -980,11 +1092,11 @@ $('aiFileIn').onchange = async e => {
 $('f').onsubmit = e => {
   e.preventDefault();
   const params = { url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value, record: $('record').checked ? '1' : '', guide: $('guide').checked ? '1' : '', flow: attachedFlow ?? '', env: $('aiEnv').value, expected: $('expected').value.trim(), files: aiFiles.length ? JSON.stringify(aiFiles.map(({ id, name }) => ({ id, name }))) : '', prompt: editingPrompt?.id ?? '' };
-  store.set({ provider: params.provider, model: params.model, record: $('record').checked, guide: $('guide').checked, aiSession: params.session });
+  store.set({ showBrowser: $('showBrowser').checked, provider: params.provider, model: params.model, record: $('record').checked, guide: $('guide').checked, aiSession: params.session });
   storeProject({ url: params.url, title: params.title, task: params.task, expected: params.expected, aiEnv: params.env });
   origin = 'ai';
-  openRunPage({ kind: 'ai', task: params.task, who: `${$('provider').selectedOptions[0]?.textContent ?? ''}${params.model ? ` (${params.model})` : ''}${params.session ? `, session ${params.session}` : ''}` });
-  start('ai', params);
+  runPage({ kind: 'ai', task: params.task, who: `${$('provider').selectedOptions[0]?.textContent ?? ''}${params.model ? ` (${params.model})` : ''}${params.session ? `, session ${params.session}` : ''}` }, !$('showBrowser').checked);
+  start('ai', params, { background: !$('showBrowser').checked });
 };
 $('task').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('f').requestSubmit(); });
 
@@ -1020,7 +1132,7 @@ $('savePrompt').onclick = async () => {
 $('promptNew').onclick = () => {
   setEditing(null);
   $('taskTitle').value = ''; $('task').value = ''; $('expected').value = '';
-  aiFiles = []; showAiFiles(); attachFlow(null);
+  aiFiles = []; showAiFiles(); attachFlow(null); syncAiForm();
   $('task').focus();
 };
 async function loadPrompts() {
@@ -1028,19 +1140,19 @@ async function loadPrompts() {
     const [list, history] = await Promise.all([api(withProject('/prompts')), api(withProject('/history'))]);
     const last = {};
     for (const r of history) if (r.prompt && !last[r.prompt]) last[r.prompt] = r; // history is newest first
+    $('promptCount').textContent = list.length || '';
     $('promptList').innerHTML = !list.length
-      ? '<div class="emptybox"><strong>No saved prompts yet</strong>Fill in the form and press Save prompt to run it later.</div>'
-      : `<div class="list">${list.map(p => {
+      ? `<div class="empty"><span class="ico">${icon('download')}</span><b>No saved prompts yet</b><span>Fill in the form and press Save prompt to run it later.</span></div>`
+      : list.map(p => {
         const r = last[p.id], files = p.files.length ? ` · ${p.files.length} file${p.files.length > 1 ? 's' : ''}` : '';
-        return `<div class="item row-item" data-id="${esc(p.id)}">
-          <span class="dot ${esc(r?.status ?? '')}"></span>
-          <button type="button" class="prompt-open" data-act="open"><span class="title">${esc(p.title || p.task)}</span><span class="meta">${esc(p.url)}${files} · Saved ${esc(ago(Date.parse(p.saved)))}</span></button>
-          <span class="tag ${esc(r?.status ?? '')}">${r ? `${esc(STATUS[r.status] ?? r.status)} ${esc(ago(r.started))}` : 'Not run yet'}</span>
-          <span class="ractions"><button type="button" class="icon-btn danger" data-act="delete" aria-label="Delete ${esc(p.title || p.id)}" title="Delete">${icon('trash')}</button></span>
+        return `<div class="item prompt-row" data-id="${esc(p.id)}">
+          <span class="item-text"><span class="title">${esc(p.title || p.task)}</span><span class="sub">${esc(p.task.split('\n')[0])}</span><span class="meta">${esc(p.url)}${files} · Saved ${esc(ago(Date.parse(p.saved)))}</span></span>
+          ${r ? statusPill(r.status).replace('</span>', ` ${esc(ago(r.started))}</span>`) : statusPill()}
+          <span class="ractions"><button type="button" class="btn ghost small" data-act="open">Use</button><button type="button" class="icon-btn danger" data-act="delete" aria-label="Delete ${esc(p.title || p.id)}" title="Delete">${icon('trash')}</button></span>
         </div>`;
-      }).join('')}</div>`;
+      }).join('');
   } catch (err) {
-    $('promptList').innerHTML = `<div class="emptybox"><strong>Saved prompts could not be loaded</strong>${esc(err.message)}</div>`;
+    $('promptList').innerHTML = `<div class="empty"><b>Saved prompts could not be loaded</b><span>${esc(err.message)}</span></div>`;
   }
 }
 $('promptList').onclick = async e => {
@@ -1063,6 +1175,7 @@ $('promptList').onclick = async e => {
     attachFlow(p.flow || null);
     aiFiles = files; showAiFiles();
     setEditing({ id, title: p.title || p.task.split('\n')[0] });
+    syncAiForm();
     $('scroll').scrollTop = 0; $('task').focus();
   } catch (err) { toast(err.message); }
 };
@@ -1073,61 +1186,82 @@ async function loadTests() {
   const [tests, history] = await Promise.all([api(withProject('/tests')), api(withProject('/history'))]);
   lastByTest = {};
   for (const run of [...history].reverse()) for (const n of run.testNames ?? []) lastByTest[n] = run;
+  $('testsProj').textContent = project.name;
   if (!tests.length) {
-    $('testList').innerHTML = `<div class="emptybox"><strong>No saved tests yet</strong>Run the AI, then click "Save as test" on the result.</div>`;
+    $('testList').innerHTML = `<div class="empty"><span class="ico">${icon('tests')}</span><b>No saved tests yet</b><span>Run the AI, then click "Save as test" on the result.</span></div>`;
   } else {
-    // recent runs per test, oldest left: the same strip as on the project cards
-    const recent = {};
-    for (const run of history) for (const n of run.testNames ?? []) (recent[n] ??= []).length < 10 && recent[n].push(run.status);
-    $('testList').innerHTML = `<div class="list">${tests.map(t => {
+    $('testList').innerHTML = tests.map(t => {
       const last = lastByTest[t.name];
-      return `<div class="item row-item" data-name="${esc(t.name)}">
+      const facts = last ? `${plural(last.stepCount ?? 0, 'step')} · ${last.secs ?? 0}s · <button type="button" class="link" data-act="last">View last result</button>` : 'Not run yet';
+      return `<div class="item test-row" data-name="${esc(t.name)}" data-find="${esc(`${t.name} ${t.titles.join(' ')}`.toLowerCase())}">
         <input type="checkbox" aria-label="Select ${esc(t.name)}">
-        <div><div class="title">${esc(t.name)}</div>
-          <div class="sub">${esc(t.titles.join(', ') || 'untitled')}</div>
-          <div class="meta">Changed ${esc(ago(t.modified))}${last ? `, last run ${esc(ago(last.started))}` : ''}${t.dataRows ? `, data set of ${t.dataRows} row${t.dataRows > 1 ? 's' : ''}` : ''}</div>
-        </div>
-        <span class="strip" aria-label="Last ${(recent[t.name] ?? []).length} runs">${[...(recent[t.name] ?? [])].reverse().map(st => `<i class="${esc(st)}" title="${esc(STATUS[st] ?? st)}"></i>`).join('')}</span>
-        <div class="ractions">
-          <button type="button" class="icon-btn" data-act="edit" aria-label="Edit ${esc(t.name)}" title="Edit script and data set">${icon('edit')}</button>
-          <button type="button" class="icon-btn" data-act="code" aria-label="Show code of ${esc(t.name)}" title="Show code" aria-pressed="false">${icon('code')}</button>
-          <button type="button" class="icon-btn danger" data-act="del" aria-label="Delete ${esc(t.name)}" title="Delete">${icon('trash')}</button>
-          <button type="button" class="btn small" data-act="run">${icon('play')}Run</button>
-        </div>
+        <span class="item-text"><span class="title" title="${esc(t.titles.join(', '))}">${esc(t.name)}</span><span class="sub">${facts}${t.dataRows ? ` · data set of ${t.dataRows} row${t.dataRows > 1 ? 's' : ''}` : ''}</span></span>
+        <span class="row-meta">${last ? esc(ago(last.started)) : ''}</span>
+        ${statusPill(last?.status)}
+        <span class="ractions">${last ? '' : `<button type="button" class="icon-btn" data-act="run" aria-label="Run ${esc(t.name)} for the first time" title="Run">${icon('play')}</button>`}<button type="button" class="icon-btn" data-act="menu" aria-label="Actions for ${esc(t.name)}" aria-haspopup="menu">${icon('chevron')}</button></span>
         <pre class="code" hidden></pre>
       </div>`;
-    }).join('')}</div>`;
+    }).join('');
   }
-  syncSelected();
+  syncSuitebar();
 }
 const selectedTests = () => [...document.querySelectorAll('#testList .item')].filter(i => i.querySelector('input')?.checked).map(i => i.dataset.name);
-function syncSelected() {
-  const n = selectedTests().length;
-  $('runSelected').disabled = !n;
-  $('runSelected').querySelector('span').textContent = n > 1 ? `Run ${n} tests as a suite` : n === 1 ? 'Run 1 test' : 'Run selected tests';
+// a row's menu: built when opened, inside the row, so its buttons reach the row's click handler
+function rowMenu(item, actions) {
+  const open = item.querySelector('.row-menu');
+  closeRowMenus();
+  if (open) return;
+  item.insertAdjacentHTML('beforeend', `<div class="menu right row-menu" role="menu">${actions.map(([act, label, ic]) => `<button type="button" role="menuitem" data-act="${act}">${icon(ic)}${esc(label)}</button>`).join('')}</div>`);
+  item.querySelector('.row-menu button').focus();
+}
+const closeRowMenus = () => document.querySelectorAll('.row-menu').forEach(m => m.remove());
+document.addEventListener('click', e => { if (!e.target.closest('.row-menu, [data-act=menu]')) closeRowMenus(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.querySelector('.row-menu')) { const item = document.querySelector('.row-menu').closest('.item'); closeRowMenus(); item.querySelector('[data-act=menu]')?.focus(); } });
+// the suite bar shows while tests are ticked
+// ▶ and Run use the bar's choices too: they are summed up in the list's head, which opens the bar without ticking
+let suiteOpen = false;
+function syncSuitebar() {
+  const boxes = [...document.querySelectorAll('#testList .item:not([hidden]) input[type=checkbox]')], n = selectedTests().length;
+  $('suitebar').hidden = !n && !suiteOpen;
+  $('suiteSummary').setAttribute('aria-expanded', String(!$('suitebar').hidden));
+  $('suiteSummary').textContent = [$('replaySession').value || 'No login session', $('replayEnv').value || 'No environment', $('replayRepeat').selectedOptions[0]?.textContent,
+    $('replayRecord').checked && 'Video', $('replayGuide').checked && 'PDF', $('replayShowBrowser').checked ? 'Visible browser' : 'In the background'].filter(Boolean).join(' · ');
+  $('suiteCount').textContent = `${n} selected`;
+  $('runSelected').querySelector('span').textContent = n > 1 ? `Run ${n} tests` : 'Run 1 test';
+  $('selAll').checked = boxes.length > 0 && boxes.every(b => b.checked);
+  $('selAll').indeterminate = !$('selAll').checked && boxes.some(b => b.checked);
 }
 function runTests(names) {
   const params = { tests: names.join(','), session: $('replaySession').value, record: $('replayRecord').checked ? '1' : '', guide: $('replayGuide').checked ? '1' : '', env: $('replayEnv').value, repeat: $('replayRepeat').value };
-  store.set({ replayRecord: $('replayRecord').checked, replayGuide: $('replayGuide').checked, replaySession: params.session, replayRepeat: params.repeat });
+  store.set({ replayShowBrowser: $('replayShowBrowser').checked, replayRecord: $('replayRecord').checked, replayGuide: $('replayGuide').checked, replaySession: params.session, replayRepeat: params.repeat });
   storeProject({ replayEnv: params.env });
   origin = 'tests';
-  openRunPage({ kind: 'replay', task: names.length > 1 ? `Suite: ${names.join(', ')}` : `Replay: ${names[0]}`, who: `Playwright, no AI${params.session ? `, session ${params.session}` : ''}` });
-  start('replay', params);
+  runPage({ kind: 'replay', task: names.length > 1 ? `Suite: ${names.join(', ')}` : `Replay: ${names[0]}`, who: `Playwright, no AI${params.session ? `, session ${params.session}` : ''}` }, !$('replayShowBrowser').checked);
+  start('replay', params, { background: !$('replayShowBrowser').checked });
 }
-$('testList').onchange = syncSelected;
+$('testList').onchange = syncSuitebar;
+$('selAll').onchange = () => { for (const b of document.querySelectorAll('#testList .item:not([hidden]) input[type=checkbox]')) b.checked = $('selAll').checked; syncSuitebar(); };
+$('suiteClear').onclick = () => { for (const b of document.querySelectorAll('#testList input[type=checkbox]')) b.checked = false; suiteOpen = false; syncSuitebar(); };
+$('suiteSummary').onclick = () => { suiteOpen = $('suitebar').hidden; syncSuitebar(); };
+$('suitebar').addEventListener('change', syncSuitebar);
+$('toRecord').onclick = () => show('record');
 $('testSearch').oninput = () => {
   const q = $('testSearch').value.trim().toLowerCase();
-  for (const item of document.querySelectorAll('#testList .item')) item.hidden = Boolean(q) && !item.textContent.toLowerCase().includes(q);
+  for (const item of document.querySelectorAll('#testList .item')) item.hidden = Boolean(q) && !item.dataset.find.includes(q); // the name and the test titles inside
+  syncSuitebar();
 };
 $('testList').onclick = async e => {
   const btn = e.target.closest('[data-act]'); if (!btn) return;
   const act = btn.dataset.act, item = btn.closest('.item'), name = item.dataset.name;
+  if (act === 'menu') return rowMenu(item, [['run', 'Run', 'play'], ['edit', 'Edit', 'edit'], ['code', 'Show code', 'code'], ['del', 'Delete', 'trash']]);
+  closeRowMenus();
+  if (act === 'last') return openPastRun(await api(`/history/${lastByTest[name].id}`), 'tests');
   if (act === 'run') runTests([name]);
   if (act === 'edit') editTest(name);
   if (act === 'code') {
     const pre = item.querySelector('pre');
     if (pre.hidden && !pre.textContent) pre.textContent = await api(withProject(`/tests/${name}`));
-    pre.hidden = !pre.hidden; btn.setAttribute('aria-pressed', String(!pre.hidden));
+    pre.hidden = !pre.hidden;
   }
   if (act === 'del') { if (!confirm(`Delete test "${name}"? The file tests/${project.id}/${name}.spec.ts, its data set and visual baselines will be removed.`)) return; await api(withProject(`/tests/${name}`), { method: 'DELETE' }); loadTests(); }
 };
@@ -1149,11 +1283,10 @@ async function ciExport() {
   } catch (err) { r.className = 'result fail'; r.hidden = false; r.innerHTML = `<h2>Export failed</h2><p class="evidence">${esc(err.message)}</p>`; }
   r.scrollIntoView({ block: 'nearest' });
 }
-$('selectAll').onclick = () => { const boxes = [...document.querySelectorAll('#testList input')]; const all = boxes.every(b => b.checked); boxes.forEach(b => { b.checked = !all; }); syncSelected(); };
 
 /* ---------- history ---------- */
 let historyRuns = [], historyFilter = 'all';
-const KIND = { ai: ['sparkles', 'AI'], fix: ['edit', 'Fix'], workflow: ['workflow', 'Workflow'], replay: ['tests', 'Replay'] };
+const KIND = { ai: ['sparkles', 'AI run'], fix: ['edit', 'Fix'], workflow: ['workflow', 'Workflow'], replay: ['tests', 'Replay'] };
 async function loadHistory() {
   historyRuns = await api(withProject('/history'));
   renderHistory();
@@ -1162,15 +1295,22 @@ function renderHistory() {
   const q = $('histSearch').value.trim().toLowerCase();
   const runs = historyRuns.filter(r => (historyFilter === 'all' || (historyFilter === 'pass' ? r.status === 'pass' : r.status !== 'pass'))
     && (!q || `${r.title ?? ''} ${r.task} ${r.provider ?? ''}`.toLowerCase().includes(q)));
-  if (!historyRuns.length) { $('historyList').innerHTML = `<div class="emptybox"><strong>No history yet</strong>Every AI run, replay and workflow is recorded here, with its video and report.</div>`; return; }
-  if (!runs.length) { $('historyList').innerHTML = `<div class="emptybox"><strong>No runs match</strong>Change the search or the filter.</div>`; return; }
+  const counts = { all: historyRuns.length, pass: historyRuns.filter(r => r.status === 'pass').length };
+  counts.fail = counts.all - counts.pass;
+  for (const c of document.querySelectorAll('[data-count]')) c.textContent = counts[c.dataset.count];
+  const empty = (b, t) => `<div class="card flush"><div class="empty"><span class="ico">${icon('history')}</span><b>${b}</b><span>${t}</span></div></div>`;
+  if (!historyRuns.length) { $('historyList').innerHTML = empty('No history yet', 'Every AI run, replay and workflow is recorded here, with its video and report.'); return; }
+  if (!runs.length) { $('historyList').innerHTML = empty('No runs match', 'Change the search or the filter.'); return; }
+  // who ran it: a schedule, plain Playwright, or the AI (provider · model)
+  const who = r => r.schedule ? `Schedule · ${r.schedule}` : r.kind === 'replay' ? 'Playwright' : [r.provider, r.model].filter(Boolean).join(' · ') || 'AI';
   $('historyList').innerHTML = `<div class="list">${runs.map(r => {
-    const [ic, kind] = KIND[r.kind] ?? KIND.replay;
-    return `<button type="button" class="item" data-id="${esc(r.id)}">
-      <span class="kind ${esc(r.status)}" title="${esc(STATUS[r.status] ?? r.status)}">${icon(ic)}</span>
-      <span><span class="title" style="display:block">${esc((r.title || (r.task ?? '').split('\n')[0]).slice(0, 140))}</span>
-        <span class="sub" style="display:block">${esc(kind === 'Replay' && r.testNames?.length > 1 ? 'Suite' : kind)}, ${esc(ago(r.started))}, ${r.secs ?? 0} s${r.schedule ? ', scheduled' : ''}${r.provider ? `, ${esc(r.provider)}` : ''}</span></span>
-      <span class="tags"><span class="tag ${esc(r.status)}">${esc(STATUS[r.status] ?? r.status)}</span>${r.issueCount ? `<span class="tag fail">${r.issueCount} app error${r.issueCount > 1 ? 's' : ''}</span>` : ''}${r.a11yCount ? `<span class="tag">♿ ${r.a11yCount}</span>` : ''}</span>
+    const kind = r.kind === 'replay' && r.testNames?.length > 1 ? 'Suite' : (KIND[r.kind] ?? KIND.replay)[1];
+    return `<button type="button" class="item hist-row" data-id="${esc(r.id)}">
+      ${statusPill(r.status)}
+      <span class="item-text"><span class="title">${esc((r.title || (r.task ?? '').split('\n')[0]).slice(0, 140))}${r.issueCount ? ` <span class="tag fail">${r.issueCount} app error${r.issueCount > 1 ? 's' : ''}</span>` : ''}${r.a11yCount ? ` <span class="tag">♿ ${r.a11yCount}</span>` : ''}</span>
+        <span class="sub">${esc(kind)} · ${plural(r.stepCount ?? 0, 'step')} · ${esc(who(r))}</span></span>
+      <span class="when"><span class="row-meta">${esc(ago(r.started))}</span><span class="row-meta">${r.secs ?? 0} s</span></span>
+      ${icon('right')}
     </button>`;
   }).join('')}</div>`;
 }
@@ -1182,8 +1322,11 @@ for (const b of document.querySelectorAll('[data-filter]')) b.onclick = () => {
 };
 $('historyList').onclick = async e => {
   const b = e.target.closest('button.item'); if (!b) return;
-  const run = await api(`/history/${b.dataset.id}`);
-  origin = 'history';
+  openPastRun(await api(`/history/${b.dataset.id}`));
+};
+// a finished run's full page (History, or Open result on a summary card); Back returns to `from`
+function openPastRun(run, from = 'history') {
+  origin = from;
   viewing = null; // runs in progress go on in the background (sidebar chips)
   $('rec').hidden = true; $('caption').hidden = true;
   openRunPage({ kind: run.kind, task: run.task ?? '', who: `${new Date(run.started).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}${run.provider ? `, ${run.provider}` : ''}${run.session ? `, session ${run.session}` : ''}` });
@@ -1207,7 +1350,7 @@ $('historyList').onclick = async e => {
   if (run.log?.length) $('log').textContent = run.log.join('\n');
   renderResult(run);
   $('scroll').scrollTop = 0;
-};
+}
 
 /* ---------- workflows ---------- */
 const blockTitle = b => `${b.n}. ${b.label}${b.iteration ? ` (#${b.iteration})` : ''}`;
@@ -1224,22 +1367,24 @@ async function loadWorkflows() {
   const [list, history] = await Promise.all([api(withProject('/workflows')), api(withProject('/history'))]);
   workflows = list;
   const last = id => history.find(r => r.kind === 'workflow' && r.workflow === id);
-  $('wfList').innerHTML = list.length ? `<div class="list">${list.map(w => {
+  // the chain of top-level blocks, each with its type's color
+  const chain = types => (types ?? []).map((t, i) => `${i ? '<span class="arrow" aria-hidden="true">→</span>' : ''}<span class="tag"><span class="sw" style="background:var(--t-${esc(t)})"></span>${esc(BLOCKS[t]?.name ?? t)}</span>`).join('');
+  $('wfList').innerHTML = `<div class="card flush">${list.length ? list.map(w => {
     const l = last(w.id);
-    const recent = history.filter(r => r.kind === 'workflow' && r.workflow === w.id).slice(0, 10).map(r => r.status);
-    return `<div class="item row-item" data-id="${esc(w.id)}">
-      <span class="kind ${l ? esc(l.status) : ''}">${icon('workflow')}</span>
-      <div><div class="title">${esc(w.name)}</div>
-        ${w.description ? `<div class="sub">${esc(w.description)}</div>` : ''}
-        <div class="meta">${w.blocks} block${w.blocks === 1 ? '' : 's'}${w.params?.length ? `, asks for ${w.params.map(x => esc(x.name)).join(', ')}` : ''}, changed ${esc(ago(w.modified))}</div></div>
-      <span class="strip" aria-label="Last ${recent.length} runs">${[...recent].reverse().map(st => `<i class="${esc(st)}" title="${esc(STATUS[st] ?? st)}"></i>`).join('')}</span>
-      <div class="ractions">
-        <button type="button" class="icon-btn" data-act="open" aria-label="${'Edit'} ${esc(w.name)}" title="${'Open in Workflow Studio'}">${icon('edit')}</button>
+    return `<div class="item wf-row" data-id="${esc(w.id)}">
+      <span class="item-text wf-text">
+        <span class="wf-name"><span class="title">${esc(w.name)}</span>${statusPill(l?.status)}</span>
+        ${w.description ? `<span class="sub">${esc(w.description)}</span>` : ''}
+        <span class="chain" aria-label="Blocks">${chain(w.types)}</span>
+        <span class="sub">${l ? `Last run ${esc(ago(l.started))}` : 'Never run'}${w.params?.length ? ` · asks for ${w.params.map(x => esc(x.name)).join(', ')}` : ''}</span>
+      </span>
+      <span class="ractions">
+        <button type="button" class="btn ghost small" data-act="open" aria-label="Edit ${esc(w.name)}" title="Open in Workflow Studio">Edit</button>
         <button type="button" class="icon-btn danger" data-act="del" aria-label="Delete ${esc(w.name)}" title="Delete">${icon('trash')}</button>
         <button type="button" class="btn small" data-act="run">${icon('play')}Run</button>
-      </div>
+      </span>
     </div>`;
-  }).join('')}</div>` : `<div class="emptybox"><strong>No workflows yet</strong>Click "New workflow" and add blocks.</div>`;
+  }).join('') : `<div class="empty"><span class="ico">${icon('workflow')}</span><b>No workflows yet</b><span>Chain an AI task, a check and a saved test to cover a longer journey.</span></div>`}</div>`;
 }
 $('wfNew').onclick = () => studio.open(null);
 $('wfList').onclick = async e => {
@@ -1281,14 +1426,14 @@ $('recForm').onsubmit = e => {
   store.set({ recSession: session });
   storeProject({ recUrl: url, recEnv: env });
   $('recResult').hidden = true;
-  $('recStart').disabled = true; $('recStop').hidden = false;
+  $('recStart').disabled = true; $('recBusy').hidden = false; $('recIdle').hidden = true;
   $('recState').textContent = 'Opening the browser…';
   recEs = new EventSource('/record?' + new URLSearchParams({ project: project.id, url, session, env }));
-  const end = () => { recEs.close(); $('recStart').disabled = false; $('recStop').hidden = true; };
+  const end = () => { recEs.close(); $('recStart').disabled = false; $('recBusy').hidden = true; $('recIdle').hidden = false; };
   recEs.addEventListener('started', () => { $('recState').textContent = 'Recording. Click through the flow in the new browser window, then close that window.'; setStatus('Recording', 'run'); });
   recEs.addEventListener('fail', ev => { end(); $('recState').textContent = ''; setStatus('Ready'); showRecResult(null, JSON.parse(ev.data)); });
   recEs.addEventListener('done', ev => { end(); $('recState').textContent = ''; setStatus('Flow recorded', 'pass'); showRecResult(JSON.parse(ev.data)); });
-  recEs.onerror = () => { if (!$('recStop').hidden) { end(); $('recState').textContent = 'Connection lost'; setStatus('Ready'); } };
+  recEs.onerror = () => { if (!$('recBusy').hidden) { end(); setStatus('Recording: the connection to the app was lost'); } };
 };
 $('recStop').onclick = () => { $('recState').textContent = 'Stopping…'; fetch('/record/stop', { method: 'POST' }); };
 
@@ -1297,13 +1442,13 @@ function showRecResult(flow, error) {
   r.hidden = false;
   if (!flow) { r.className = 'result fail'; r.innerHTML = `<h2>Nothing recorded</h2><p class="evidence">${esc(error)}</p>`; return; }
   const steps = (flow.script.match(/await page\./g) ?? []).length;
-  r.className = 'result pass';
-  r.innerHTML = `<h2>✓ Flow recorded <small>${steps} actions</small></h2>
-    <p class="muted">Passwords stored under Settings → Secrets are replaced by <code>{{NAME}}</code>.</p>
+  r.className = 'card narrow record-card';
+  r.innerHTML = `<div class="rec-head"><h2 class="card-title">Recorded script</h2><span class="pill pass">${icon('check')}${plural(steps, 'action')}</span></div>
+    <p class="hint">Passwords stored under Settings → Secrets are replaced by <code>{{NAME}}</code>.</p>
     <pre class="code"></pre>
     <div class="actions">
-      <button type="button" class="btn small" data-act="ai">Use with AI</button>
-      <button type="button" class="btn ghost small" data-act="copy">Copy script</button>
+      <button type="button" class="btn ghost" data-act="ai">${icon('sparkles')}Give to AI as route map</button>
+      <button type="button" class="btn quiet" data-act="copy">Copy script</button>
     </div>`;
   r.querySelector('pre').textContent = flow.script;
   r.querySelector('[data-act=copy]').onclick = ev => navigator.clipboard.writeText(flow.script).then(() => { ev.target.textContent = 'Script copied'; });
@@ -1311,7 +1456,7 @@ function showRecResult(flow, error) {
     attachFlow(flow.id);
     $('url').value = $('recUrl').value;
     if (!$('task').value.trim()) $('task').value = 'Follow the recorded flow and check that it completes successfully.';
-    show('ai'); $('task').focus();
+    syncAiForm(); show('ai'); $('task').focus();
   };
   r.append(inlineForm('Save as test', 'test-name, e.g. checkout-flow', '', async name => {
     const { name: savedName } = await api(withProject('/tests'), { method: 'POST', body: JSON.stringify({ name, code: flow.script }) });
@@ -1358,7 +1503,7 @@ $('editForm').onsubmit = async e => {
     $('editDlg').close(); setStatus('Test saved'); loadTests();
   } catch (err) { $('editErr').textContent = err.message; }
 };
-$('aiEnv').onchange = () => loadSettings();
+$('aiEnv').onchange = () => loadSettings(); // the environment's values become chips
 // visual check at the cursor: compare the whole page with its baseline (first run records the baseline)
 $('insertVisual').onclick = () => {
   const ta = $('editCode'), line = "  await expect(page).toHaveScreenshot({ fullPage: true, maxDiffPixelRatio: 0.01 });\n";
@@ -1391,14 +1536,18 @@ $('scroll').addEventListener('scroll', e => e.target.classList.toggle('scrolled'
 // One collapsible row per provider; API keys are write-only (server never returns them)
 function providerRow(p = { engine: 'openai-compatible' }, open = false) {
   const d = document.createElement('details');
-  d.className = 'prov'; d.open = open;
+  d.className = 'prov provider'; d.open = open;
   d.dataset.id = p.id || ''; d.dataset.apiKeyEnv = p.apiKeyEnv || '';
   const cc = p.engine === 'claude-code';
   const needsKey = !cc && p.apiKeyEnv && !p.ready;
-  const status = cc ? (p.account ? ['ok', 'Signed in'] : ['need', 'Not signed in']) : needsKey ? ['need', 'Needs API key'] : ['ok', 'Ready'];
+  const status = cc ? (p.account ? ['pass', 'Signed in'] : ['warn', 'Not signed in']) : needsKey ? ['warn', 'Needs a key'] : p.apiKeyEnv ? ['pass', 'Key saved'] : ['pass', 'Ready'];
+  // the card's one line: whose subscription, or which endpoint and model
+  const line = !p.id ? 'Not saved yet' : cc ? (p.account ? `Uses the subscription of ${p.account.email}` : 'Uses the subscription you are signed in with')
+    : `${p.baseURL || 'No address yet'} · ${p.model || 'default model'}`;
+  const initials = ((p.label || 'New').match(/[\p{L}\p{N}]+/gu) ?? ['?']).map(w => w[0]).join('').slice(0, 2).toUpperCase();
   const keyHint = p.apiKeyEnv ? (p.ready ? 'Saved. Fill in only to replace it.' : 'Not set yet') : 'Leave empty if not needed (e.g. Ollama)';
   d.innerHTML = `
-    <summary><span class="name"></span><span class="badge ${status[0]}">${status[1]}</span></summary>
+    <summary><span class="prov-ico" aria-hidden="true">${esc(initials)}</span><span class="prov-text"><span class="prov-line"><span class="name"></span><span class="pill ${status[0]}">${status[0] === 'pass' ? icon('check') : icon('alert')}${status[1]}</span></span><span class="sub">${esc(line)}</span></span><span class="btn ghost small">Configure</span></summary>
     <div class="prov-body">
       <div class="grid2">
         <label>Name <input class="field" name="label" required></label>

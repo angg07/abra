@@ -50,6 +50,7 @@ test('Import reads a project file and opens the imported project', async () => {
   const page = await openPage();
   page.on('dialog', d => d.accept()); // the file list confirmation
   await page.goto(app.base);
+  await page.locator('#projMore').click(); // Export all / Import live under ⋯
   await page.locator('#importProject').waitFor();
   const bundle = { format: 'ai-browser-runner-project', version: 1, project: { id: 'zz-ui-import', name: 'UI import' }, secrets: [],
     files: { 'a.spec.ts': { text: "import { test } from '@playwright/test';\ntest('a', async () => {});" } } };

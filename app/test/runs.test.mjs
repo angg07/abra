@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLimiter, createPortPool, mcpServerFor, idleToClose } from '../runs.mjs';
+import { createLimiter, createPortPool, mcpServerFor, idleToClose, memoryGate } from '../runs.mjs';
 
 const tick = () => new Promise(r => setImmediate(r));
 
@@ -76,4 +76,74 @@ test('idleToClose: only finished runs that still hold an AI browser, oldest fini
   ];
   assert.deepEqual(idleToClose(runs, 2), ['ai-d']);
   assert.deepEqual(idleToClose(runs, 3), []);
+});
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+test('limiter: a second run waits for free memory; the first always starts; the line re-checks by itself', async () => {
+  let room = false;
+  const l = createLimiter(2, { roomForMore: () => room, recheckMs: 20 }), reasons = [];
+  const r1 = await l.acquire(); // the first run starts even with too little memory
+  let started = false;
+  const p2 = l.acquire([], (pos, reason) => reasons.push(reason)).then(r => { started = true; return r; });
+  await sleep(60);
+  assert.deepEqual(reasons, ['memory']);
+  assert.equal(started, false);
+  room = true;
+  await sleep(60); // no slot came back: the periodic check lets it in
+  assert.equal(started, true);
+  r1(); (await p2)();
+  assert.deepEqual(l.stats(), { active: 0, waiting: 0 });
+});
+
+test('limiter: when the other run ends, a run waiting for memory starts at once (it is now the first)', async () => {
+  const l = createLimiter(2, { roomForMore: () => false, recheckMs: 60_000 });
+  const r1 = await l.acquire();
+  let started = false;
+  const p2 = l.acquire().then(r => { started = true; return r; });
+  await tick();
+  assert.equal(started, false);
+  r1(); await tick();
+  assert.equal(started, true);
+  (await p2)();
+});
+
+test('limiter: a full line says slot, not memory; leaving the line stops the re-check', async () => {
+  const l = createLimiter(1, { roomForMore: () => false, recheckMs: 20 }), reasons = [];
+  const r1 = await l.acquire();
+  const leave = new AbortController();
+  const p2 = l.acquire([], (pos, reason) => reasons.push(reason), leave.signal).catch(e => e.message);
+  await tick();
+  assert.deepEqual(reasons, ['slot']);
+  leave.abort();
+  assert.equal(await p2, 'left the queue');
+  assert.deepEqual(l.stats(), { active: 1, waiting: 0 });
+  r1();
+});
+
+test('idleToClose with 0 to keep: every finished run that still holds a browser, none that are running', () => {
+  const runs = [
+    { id: 'a', done: true, doneAt: 2, browser: true },
+    { id: 'b', done: false, doneAt: undefined, browser: true },
+    { id: 'c', done: true, doneAt: 1, browser: true },
+    { id: 'd', done: true, doneAt: 3, browser: false },
+  ];
+  assert.deepEqual(idleToClose(runs, 0), ['c', 'a']);
+});
+
+test('memoryGate: short of memory, it frees finished runs\' browsers and says no; enough memory, yes without closing anything', () => {
+  let free = 1000, freed = 0;
+  const gate = memoryGate({ freeMB: () => free, minMB: 2500, freeIdle: () => { freed++; free += 1200; }, platform: 'linux' });
+  assert.equal(gate(), false); // short: closes the idle browsers, the next re-check will see the memory
+  assert.equal(freed, 1);
+  free = 3000;
+  assert.equal(gate(), true);
+  assert.equal(freed, 1); // enough memory: nothing closed
+});
+
+test('memoryGate: on macOS free memory reads far too low, so the gate stays open', () => {
+  let freed = 0;
+  const gate = memoryGate({ freeMB: () => 300, minMB: 2500, freeIdle: () => { freed++; }, platform: 'darwin' });
+  assert.equal(gate(), true);
+  assert.equal(freed, 0);
 });

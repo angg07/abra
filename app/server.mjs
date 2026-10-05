@@ -5,7 +5,7 @@ import { format } from 'node:util';
 import { join, relative } from 'node:path';
 import { engines } from './agents.mjs';
 import { createStage, portAnswers } from './stage.mjs';
-import { createPortPool, createLimiter, mcpServerFor, idleToClose } from './runs.mjs';
+import { createPortPool, createLimiter, mcpServerFor, idleToClose, memoryGate } from './runs.mjs';
 import { packProject, unpackBundle, missingVars, packAll, unpackAll, isAll } from './bundle.mjs';
 import { resolveConfigDir, claudeAccount } from './claude-config.mjs';
 import { devices as playwrightDevices, chromium as bundledChromium } from 'playwright-core';
@@ -15,7 +15,7 @@ import varsCore from './vars-core.cjs';
 import guard from './guard.cjs';
 const { makeResolver, parseCsv, secretsFromEnv } = varsCore;
 import { runTests } from './replay.mjs';
-import { addRun, getRun, listRuns, patchRun, removeRuns, runOfFile, dataDir } from './history.mjs';
+import { addRun, getRun, listRuns, patchRun, removeRuns, runOfFile, dataDir, markInterrupted } from './history.mjs';
 import { MAX_FILE, tooLarge, listTestFiles, saveTestFile, deleteTestFile, saveUpload, pickUploads, copyUploads, pruneUploads, filesIn, testFilesDir } from './test-files.mjs';
 import { listPrompts, readPrompt, savePrompt, deletePrompt, usePromptFiles, promptExists } from './prompts.mjs';
 import { buildReport } from './report.mjs';
@@ -27,7 +27,7 @@ import { recordFlow, stopRecording, isRecording, flowScript, flowStorage } from 
 import { splitAnswer, scriptFromCode, flakyOf, expectedVerdict, isAppError } from './shared.mjs';
 import { checkRequirements, installBrowsers, OS_NAMES } from './setup.mjs';
 import { issueUrl } from './issue.mjs';
-import { release as osRelease } from 'node:os';
+import { release as osRelease, freemem } from 'node:os';
 import { spawn } from 'node:child_process';
 import { aiStep, replayStep, guideCollector, buildGuidePdf, rewriteGuide, secretMasker, runTitle, entersValue, guideFolder, readGuideDoc, cleanGuideDoc, renderGuidePdf, FRAME_FILE, frameType, guideFrames, addGuideFrame, pruneGuideFrames } from './guide.mjs';
 import { finishVideo } from './video.mjs';
@@ -323,13 +323,18 @@ function pruneOutputs(keep) {
 // Up to MAX_RUNS runs at once, each with its own browser (stage). More wait in line (FIFO); a client that
 // leaves while waiting drops out. Runs that reset the same test database never overlap.
 const MAX_RUNS = Math.max(1, Number(process.env.MAX_RUNS) || 2);
-const slots = createLimiter(MAX_RUNS);
+// a run next to others only starts with this much free memory (each run: a browser + the AI's process, ~1-2 GB)
+const MIN_FREE_MB = Math.max(0, Number(process.env.MIN_FREE_MB) || 2500);
+const freeMB = () => Math.round(freemem() / 1048576);
+// short of memory, finished runs' browsers close first (trimIdle(0)): a waiting run then fits at the next re-check
+const slots = createLimiter(MAX_RUNS, { roomForMore: memoryGate({ freeMB, minMB: MIN_FREE_MB, freeIdle: () => trimIdle(0) }) });
 const active = new Map(); // run id -> { stage, project, abort, done, doneAt }: live view, Stop and "Save login session" by id
 const dbLock = (project, env) => { const db = projectDb(project, env.name)?.cfg; return db?.reset ? [`db:${db.host}:${db.port}/${db.database}`] : []; };
-// A finished AI run keeps its browser 5 minutes for "Save login session"; keep at most MAX_RUNS of those
-function trimIdle() {
+// A finished AI run keeps its browser 5 minutes for "Save login session"; keep at most `keep` of those
+// (0 when memory is short and a run is waiting: its browser needs the memory more)
+function trimIdle(keep = MAX_RUNS) {
   const runs = [...active.entries()].map(([id, r]) => ({ id, done: r.done, doneAt: r.doneAt, browser: r.stage.hasOwnBrowser() }));
-  for (const id of idleToClose(runs, MAX_RUNS)) { active.get(id).stage.close(); active.delete(id); }
+  for (const id of idleToClose(runs, keep)) { active.get(id).stage.close(); active.delete(id); }
 }
 const shutdown = async why => { console.log(`Stopped (${why})`); await Promise.all([...active.values()].map(r => r.stage.close())); process.exit(0); };
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => shutdown(sig)); // Playwright's own handler doesn't exit
@@ -349,6 +354,8 @@ When done, answer in English (even if the task is written in another language) w
 // the project's source folders, if set (only the Claude Code engine reads it)
 const codebaseOf = id => { try { return id ? readProject(id).codebase : undefined; } catch { return undefined; } };
 
+// a run in History as soon as it starts: if the app dies mid-run, the next start marks it interrupted
+const markRunning = entry => addRun({ ...entry, status: 'running' });
 const stamp = t => new Date(t).toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
 // Shared shell for AI runs and replays: SSE stream, abort, recording, history entry
@@ -356,7 +363,7 @@ const stamp = t => new Date(t).toISOString().replace(/[:.]/g, '-').slice(0, 19);
 function withRun(res, opts, body) {
   const left = new AbortController(); // the client left while waiting in line
   res.on('close', () => left.abort());
-  const queued = position => res.write(`event: queued\ndata: ${JSON.stringify({ position })}\n\n`);
+  const queued = (position, reason) => res.write(`event: queued\ndata: ${JSON.stringify({ position, reason, freeMB: freeMB(), needMB: MIN_FREE_MB })}\n\n`);
   return slots.run(opts.locks ?? [], queued, left.signal, () => runOnStage(res, opts, body));
 }
 // The project's instructions for videos and PDF guides (project form): one AI call, without browser tools, rewrites
@@ -394,6 +401,7 @@ async function runOnStage(res, { kind, record, guide, label, project, provider }
   mkdirSync(runDir, { recursive: true });
   const entry = { id, kind, started, project };
   const stage = createStage(ports);
+  stage.needFrames(Boolean(record || guide || kind === 'workflow')); // otherwise the screencast runs only while watched
   const run = { stage, project, abort, done: false };
   active.set(id, run);
   const rec = loadRecording();
@@ -465,6 +473,7 @@ async function runOnStage(res, { kind, record, guide, label, project, provider }
 function aiRun(res, { project, url, title, task, provider, model, record, guide, session, flow, env, expected, files = [], prompt }) {
   return withRun(res, { kind: 'ai', record, guide, label: provider.id, project, provider, locks: dbLock(project, env) }, async ({ send, signal, entry, rec, runDir, stage, startRecording, addGuideStep }) => {
     Object.assign(entry, { url, title: title || undefined, task, prompt: prompt || undefined, provider: provider.label, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, ...(files.length && { files }), steps: [] });
+    markRunning(entry);
     await resetDatabase(project, env, line => send('text', line));
     const startUrl = makeResolver({ vars: env.vars }).fill(url); // {{baseUrl}} in the URL field
     const sessionData = session ? JSON.parse(readFileSync(pickSession(project, session), 'utf8')) : null;
@@ -562,6 +571,7 @@ function replayRun(res, { project, names, record, guide, session, env, times = 1
     const extra = [rows > 1 && `${rows} data rows`, times > 1 && `${times}× each`].filter(Boolean).join(', ');
     const what = `${names.length > 1 ? `Suite: ${names.join(', ')}` : `Replay: ${names[0]}`}${extra ? ` (${extra})` : ''}`;
     Object.assign(entry, { task: updateSnapshots ? `Update visual baseline: ${names.join(', ')}` : schedule ? `Scheduled "${schedule}": ${what}` : what, testNames: names, session: session || undefined, env: env.name || undefined, times, schedule });
+    markRunning(entry);
     await resetDatabase(project, env, line => send('log', line));
     const { tests, ok } = await playTests(names.map(n => testPath(project, n)), { project, rec, session, vars: env.vars, envName: env.name, dbUrl: projectDb(project, env.name)?.url, repeatEach: updateSnapshots ? 1 : Math.max(1, rows) * times, dataRows: rows, updateSnapshots }, ctx);
     Object.assign(entry, { status: ok ? 'pass' : 'fail', tests, flaky: flakyOf(tests) });
@@ -578,6 +588,7 @@ function fixRun(res, { run, name, provider, model, env }) {
     const failed = run.tests.find(t => t.file.replace(/\.spec\.ts$/, '') === name);
     const original = readTest(project, name);
     Object.assign(entry, { task: `Fix test: ${name}`, testNames: [name], fixOf: run.id, provider: provider.label, model: model || provider.model || '', session: run.session, env: env.name || undefined, original, steps: [] });
+    markRunning(entry);
     await resetDatabase(project, env, line => send('text', line));
     const sessionData = run.session ? JSON.parse(readFileSync(pickSession(project, run.session), 'utf8')) : null;
     const runFiles = join(runDir, 'mcp', 'files');
@@ -636,6 +647,7 @@ function workflowRun(res, { project, wf, params, env, session, record, guide, pr
   return withRun(res, { kind: 'workflow', record, guide, label: `wf-${wf.id}`, project, provider, locks: dbLock(project, env) }, async ctx => {
     const { send, signal, entry, rec, runDir, stage, mask, startRecording, addGuideStep } = ctx;
     Object.assign(entry, { task: `Workflow: ${wf.name}`, workflow: wf.id, params, env: env.name || undefined, session: session || undefined, provider: provider.label, model: model || provider.model || '', blocks: [], steps: [] });
+    markRunning(entry);
     await resetDatabase(project, env, line => send('text', line));
     const secrets = projectSecrets(project);
     // HTTP blocks fill {{...}} here, with this project's secrets only
@@ -913,8 +925,10 @@ async function route(req, res) {
     const runs = listRuns(ids);
     return json(res, all.map(({ db, ...pr }) => {
       const own = runs.filter(r => r.project === pr.id);
+      const weekAgo = Date.now() - 7 * 86_400_000, week = own.filter(r => r.started >= weekAgo); // the Projects page's numbers
       return {
-        ...pr, tests: listTests(pr.id).map(t => t.name), runs: own.length,
+        ...pr, tests: listTests(pr.id).map(t => t.name), runs: own.length, workflows: listWorkflows(pr.id).length,
+        week: { runs: week.length, passed: week.filter(r => r.status === 'pass').length },
         last: own[0] ? { status: own[0].status, started: own[0].started } : null, recent: own.slice(0, 12).map(r => r.status),
         secrets: projectSecrets(pr.id), sessions: listSessions(pr.id), hasLogo: Boolean(projectLogoDataUrl(pr.id)),
         db, dbPassSet: Object.fromEntries(Object.keys(db ?? {}).map(e => [e, Boolean(process.env[dbPassKey(pr.id, e)])])),
@@ -1250,6 +1264,9 @@ Close it, or start this one on another port:  ${other}\n`);
   process.exit(1);
 });
 server.listen(PORT, '127.0.0.1', () => { // this computer only: nothing else on the network can reach it
+  // runs cut off when the app last stopped (killed, crashed, out of memory): History says so; their scratch folders go.
+  // Only once the port is ours: a second start (port taken) must not touch the running app's runs.
+  for (const id of markInterrupted()) rmSync(join(dataDir, 'live', id), { recursive: true, force: true });
   console.log(`ABRA → http://127.0.0.1:${PORT}`);
   if (process.env.ABR_OPEN) openWindow(`http://127.0.0.1:${PORT}`, true); // the portable launcher asks for this
 });

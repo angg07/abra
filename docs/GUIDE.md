@@ -86,12 +86,12 @@ SECRET_ADMIN_PASS=...                 # a secret, used as {{ADMIN_PASS}}
 
 ### Share a project
 
-In a project, **Edit → Export project** saves `<project>.abr.json`. On another computer, **Projects → Import**
+In a project, **Edit → Export project** saves `<project>.abr.json`. On another computer, **Projects → ⋯ → Import project**
 reads it. Secrets, database passwords, the codebase folder, login sessions and run history are never in the file: after importing,
 the app lists the secrets and environment values to add. Test files are code that runs on your computer:
 import only files from people you trust.
 
-To move everything at once, **Projects → Export all** saves every project in one JSON file
+To move everything at once, **Projects → ⋯ → Export all** saves every project in one JSON file
 (`abra-projects-<date>.abr.json`); **Import** reads it too. Every project in it is checked before
 anything is written; projects that already exist are skipped, imported as new copies or overwritten, as you choose.
 
@@ -119,17 +119,19 @@ for you. Providers, secrets, login sessions, environments and schedules are shar
 
 | Tab | What it does |
 |---|---|
-| **Run AI** | URL + instructions in plain language. The AI (Claude Code, or any OpenAI-compatible API) drives the browser. Optional: login session, environment, recorded flow, video, PDF guide. |
+| **Run AI** | URL + instructions in plain language. The AI (Claude Code, or any OpenAI-compatible API) drives the browser. Under the instructions, **Insert** chips type an environment value, a secret (🔒, the AI sees only the name), `{{today}}` or `{{random}}` at the cursor; the counter shows the length (at most 10,000 characters). **Title and files** folds away the optional title and upload files. **Run settings** sums up AI, environment and output; **Change settings** opens the choices (AI, model, login session, environment, video, PDF guide, Show the browser). |
 | **Record flow** | Opens Playwright codegen on your desktop. Click through the flow, close the window, then copy the script, save it as a test, or give it to the AI as a route map. |
-| **Saved tests** | Plain `@playwright/test` files in `tests/<project>/`. Replay one, or tick several to run a suite, without AI. **Edit** opens the script and its CSV data set. A failing test gets **Fix with AI**. Files: templates and documents a test uploads live in `tests/<project>/files/<test>/` (Edit test › Files, 20 MB each); the script uses `setInputFiles('{{file.name}}')`. Files added to a Run AI are kept with the test when you save it. |
+| **Saved tests** | Plain `@playwright/test` files in `tests/<project>/`, replayed without AI. A test that never ran shows **▶**; every row has a **⌄** menu with Run, Edit, Show code and Delete, and **View last result** opens its last run. Tick tests and a **suite bar** appears with the login session, environment, repeat, Video, PDF and Show browser, plus **Run N tests**; these choices also apply to ▶ and Run. **Edit** opens the script and its CSV data set. A failing test gets **Fix with AI**. Files: templates and documents a test uploads live in `tests/<project>/files/<test>/` (Edit test › Files, 20 MB each); the script uses `setInputFiles('{{file.name}}')`. Files added to a Run AI are kept with the test when you save it. |
 | **Workflows** | Blocks chained in one browser, edited in Workflow Studio (below). |
-| **History** | Every run with its result, steps, errors, video, PDF guide and HTML report. |
+| **History** | Every run with its result, steps, errors, video, PDF guide and HTML report. **All / Passed / Failed** show their counts; each row says what ran (AI run, Replay, Suite, Workflow, Fix), how many steps, and who ran it (the AI, Playwright or a schedule). |
+
+The **Projects** page shows this week's runs over every project, how many passed, the projects whose last run failed, and the runs going now; each project card shows its pass rate over the last runs, its tests, workflows and environment, with **Open** (Saved tests) and **Run AI**.
 
 ### Saved prompts
 
 **Run AI > Save prompt** keeps the whole form (URL, title, instructions, expected result, AI, environment, session,
 video/PDF choices, an attached flow and its files) without running it. **Saved prompts** under the form lists them per
-project with their last run. Click one to fill the form back, then press Run AI, or change it and press Save prompt to
+project with their last run. **Use** fills the form back, then press Run AI, or change it and press Save prompt to
 update it (**New prompt** starts an empty one). Running a prompt keeps it. Saved prompts and their files are in
 `tests/<project>/prompts/` and `prompt-files/`, and travel with project export and import (an export that holds
 saved prompts needs ABRA 1.3.0 or newer to import).
@@ -191,6 +193,21 @@ project.
 (default `MAX_RUNS=2`; each browser needs a few hundred MB of memory). More runs wait in line. Start another run
 while one goes: each run in progress gets a chip in the sidebar that opens it (the browser, its steps, Stop). Runs that reset
 the same test database always take turns. Browser debugging ports come from 9400–9499.
+
+A run next to others only starts when the computer has at least 2.5 GB of free memory (`MIN_FREE_MB=2500`); until
+then it waits and says so, and finished runs' browsers (otherwise kept 5 minutes for "Save login session") close to
+make room. The first run always starts. On macOS free memory is not checked (the system reports too little), so
+`MAX_RUNS` alone decides there. If the app is closed mid-run (killed, crashed, the computer
+ran out of memory), History shows that run as **Interrupted** the next time the app starts.
+
+The live view only runs while a run's page is open, or while the run records a video, builds a PDF guide or is a
+workflow: a run you are not watching costs much less CPU. Videos are encoded with 2 threads and a short lookahead,
+about 300 MB of memory at 1080p instead of ~700 MB.
+
+**Show browser** (Run AI, Saved tests) unticked: the run starts in the background, as a chip in the sidebar, and you
+stay on the page you are on. When it ends, a summary card shows the result (status, duration, tests passed, the first
+error) with **Open result**; when the app's window is not in front, a system notification says so too. Click the chip
+to watch a background run. The choice is remembered.
 
 The app's own data (run history) is one SQLite file, `app/data/app.db` (Node's built-in `node:sqlite`); back it
 up by copying it. An old `app/data/history.json` is imported once on start.

@@ -12,7 +12,7 @@ after(() => app.stop());
 test('every font the CSS names is served as woff2', async () => {
   const css = readFileSync(join(app.root, 'app', 'app.css'), 'utf8');
   const urls = [...css.matchAll(/url\('(\/fonts\/[^']+)'\)/g)].map(m => m[1]);
-  assert.equal(urls.length, 5);
+  assert.equal(urls.length, 7);
   for (const u of urls) {
     const r = await fetch(app.base + u);
     assert.equal(r.status, 200, u);

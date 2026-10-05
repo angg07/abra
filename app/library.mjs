@@ -158,7 +158,7 @@ export const listWorkflows = project => (existsSync(wfDir(project)) ? readdirSyn
   .map(f => {
     const wf = JSON.parse(readFileSync(join(wfDir(project), f), 'utf8'));
     const count = bs => bs.reduce((n, b) => n + 1 + count(b.blocks ?? []), 0);
-    return { id: f.slice(0, -5), name: wf.name, description: wf.description, params: wf.params, blocks: count(wf.blocks), modified: statSync(join(wfDir(project), f)).mtimeMs };
+    return { id: f.slice(0, -5), name: wf.name, description: wf.description, params: wf.params, blocks: count(wf.blocks), types: (wf.blocks ?? []).map(b => b.type), modified: statSync(join(wfDir(project), f)).mtimeMs };
   })
   .sort((a, b) => b.modified - a.modified);
 export const readWorkflow = (project, id) => ({ id, ...JSON.parse(readFileSync(wfFile(project, id), 'utf8')) });

@@ -26,6 +26,7 @@ test('save, reopen, update, delete and switch project on the Run AI page', async
 
   // save without running
   await page.fill('#url', 'http://jets.test/');
+  await page.click('#filesMore summary'); // Title and files is folded while empty
   await page.fill('#taskTitle', 'B1 Polis Marine Hull');
   await page.fill('#task', 'Create a policy with two vessels');
   await page.locator('#aiFileIn').setInputFiles({ name: 'Slip.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF') });
@@ -84,6 +85,7 @@ test('save, reopen, update, delete and switch project on the Run AI page', async
 
   // a double click on Save prompt saves one prompt, not two
   await page.click('#promptNew');
+  await page.click('#filesMore summary');
   await page.fill('#taskTitle', 'Double click');
   await page.fill('#task', 'Saved once');
   await page.dblclick('#savePrompt');

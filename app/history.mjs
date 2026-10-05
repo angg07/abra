@@ -22,6 +22,14 @@ export function patchRun(id, patch) {
 
 export const getRun = id => { const row = db.prepare('SELECT data FROM runs WHERE id = ?').get(id); return row ? JSON.parse(row.data) : undefined; };
 
+export const INTERRUPTED = 'The app closed during this run (for example, the computer ran out of memory).';
+// Runs still marked running when the app starts were cut off (killed, crashed, out of memory): the process that ran
+// them is gone. Returns their ids, so their scratch folders can go too.
+export function markInterrupted() {
+  const rows = db.prepare(`SELECT data FROM runs WHERE json_extract(data, '$.status') = 'running'`).all();
+  return rows.map(({ data }) => { const r = JSON.parse(data); save({ ...r, status: 'interrupted', error: INTERRUPTED }); return r.id; });
+}
+
 // the run that produced a video or PDF: its project decides who may open the file
 export const runOfFile = (column, file) => {
   const row = db.prepare(`SELECT data FROM runs WHERE ${column === 'video' ? 'video' : 'guide'} = ?`).get(file);
@@ -47,8 +55,9 @@ export function listRuns(projects) {
     const { steps, replaySteps, log, text, script, issues, original, ...r } = JSON.parse(data);
     return {
       ...r, hasScript: Boolean(script),
+      stepCount: (steps?.length ?? 0) + (replaySteps ?? []).filter(s => !s.section).length, // section headings are not steps
       issueCount: (issues ?? []).filter(isAppError).length, // problems from the app under test
       a11yCount: (issues ?? []).filter(isA11y).length,
     };
-  });
+  }).filter(r => r.status !== 'running'); // a run in progress shows as a chip in the sidebar, not in History
 }

@@ -33,3 +33,18 @@ test('a section clicked while the project loads is not replaced by Run AI', asyn
   assert.equal(await page.locator('#view-ai').isVisible(), false);
   assert.deepEqual(errors, []);
 });
+
+test('the project sections stay hidden until the project is known (no click on them with no project yet)', async () => {
+  const page = await browser.newPage();
+  await page.addInitScript(() => localStorage.setItem('last', JSON.stringify({ setupSeen: true })));
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  let release; const slow = new Promise(r => { release = r; });
+  await page.route('**/projects', async r => { await slow; r.continue(); }); // the project list arrives late
+  await page.goto(`${app.base}/#/p/${P}`);
+  await page.waitForFunction(() => window.__appStarted);
+  assert.equal(await page.locator('nav.views [data-view=tests]').isVisible(), false);
+  release();
+  await page.locator('nav.views [data-view=tests]').waitFor();
+  assert.deepEqual(errors, []);
+  await page.close();
+});
