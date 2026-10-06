@@ -46,3 +46,12 @@ test('requirements: an unknown OS gets the Linux instructions', async () => {
   try { assert.equal(byId(await checkRequirements({ root, platform: 'freebsd', run: fakeRun({}) })).ffmpeg.fix[0].cmd, 'sudo apt install ffmpeg'); }
   finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('every item says whether it is required, what it needs and why', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'abr-req-'));
+  try {
+    const items = await checkRequirements({ root, run: async () => ({ status: 1, stdout: '' }) });
+    for (const i of items) { assert.equal(typeof i.required, 'boolean', i.id); assert.ok(i.need, i.id); assert.ok(i.why, i.id); }
+    assert.deepEqual(items.filter(i => i.required).map(i => i.id), ['node', 'chromium']);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

@@ -45,7 +45,14 @@ export const playwrights = root => (root = resolve(root), [
 ]);
 const chromiumPath = pkg => { try { return createRequire(pkg)('playwright-core').chromium.executablePath(); } catch { return ''; } };
 
-// [{ id, label, status: 'ok' | 'warn' | 'bad', detail, fix: [lines for this OS], action? }]
+// what each tool is for, as the Requirements page shows it: needed or optional, what version or kind, and why
+const ABOUT = {
+  node: { required: true, need: 'Version 22.13 or newer', why: 'Runs ABRA and the tests' },
+  chromium: { required: true, need: "Playwright's Chromium", why: 'The browser that tests and AI runs drive' },
+  ffmpeg: { required: false, need: 'With libx264', why: 'Films runs and makes the videos' },
+  claude: { required: false, need: 'Claude Code CLI, signed in', why: 'The default AI that drives the browser (or add an API key in Settings › AI)' },
+};
+// [{ id, label, status: 'ok' | 'warn' | 'bad', detail, fix: [lines for this OS], action?, required, need, why }]
 export async function checkRequirements({ root, platform = process.platform, run = defaultRun(root), nodeVersion = process.version, nodePath = process.execPath } = {}) {
   const os = osOf(platform);
   const out = [];
@@ -74,7 +81,7 @@ export async function checkRequirements({ root, platform = process.platform, run
   out.push(claude.status === 0
     ? { id: 'claude', label: 'Claude Code (AI engine)', status: 'ok', detail: claude.stdout.trim(), fix: [] }
     : { id: 'claude', label: 'Claude Code (AI engine)', status: 'warn', detail: 'Not found: install it and sign in, or add an API key in Settings › AI instead', fix: HOW.claude[os] });
-  return out;
+  return out.map(i => ({ ...i, ...ABOUT[i.id] }));
 }
 // { status, stdout } like spawnSync, without blocking the server while it waits
 function defaultRun(root) {

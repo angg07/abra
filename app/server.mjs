@@ -2,7 +2,7 @@ import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, createReadStream, readdirSync, unlinkSync, rmSync, copyFileSync, appendFileSync, renameSync } from 'node:fs';
 import { format } from 'node:util';
-import { join, relative } from 'node:path';
+import { join, relative, extname } from 'node:path';
 import { engines } from './agents.mjs';
 import { createStage, portAnswers } from './stage.mjs';
 import { createPortPool, createLimiter, mcpServerFor, idleToClose, memoryGate } from './runs.mjs';
@@ -15,22 +15,24 @@ import varsCore from './vars-core.cjs';
 import guard from './guard.cjs';
 const { makeResolver, parseCsv, secretsFromEnv } = varsCore;
 import { runTests } from './replay.mjs';
-import { addRun, getRun, listRuns, patchRun, removeRuns, runOfFile, dataDir, markInterrupted } from './history.mjs';
+import { addRun, getRun, listRuns, aiScriptRuns, patchRun, removeRuns, runOfFile, dataDir, markInterrupted } from './history.mjs';
 import { MAX_FILE, tooLarge, listTestFiles, saveTestFile, deleteTestFile, saveUpload, pickUploads, copyUploads, pruneUploads, filesIn, testFilesDir } from './test-files.mjs';
 import { listPrompts, readPrompt, savePrompt, deletePrompt, usePromptFiles, promptExists } from './prompts.mjs';
+import { readSource, saveSource, sourceFromRun, sourceFromCode } from './test-sources.mjs';
 import { buildReport } from './report.mjs';
-import { pruneDir, pruneFolders } from './housekeeping.mjs';
+import { pruneDir, pruneFolders, pruneOlder } from './housekeeping.mjs';
 import { dueSchedules, validSchedules, scheduleState, DAYS } from './scheduler.mjs';
 import { notify, summary } from './notify.mjs';
 import { ciWorkflow } from './ci.mjs';
 import { recordFlow, stopRecording, isRecording, flowScript, flowStorage } from './recorder.mjs';
 import { splitAnswer, scriptFromCode, flakyOf, expectedVerdict, isAppError } from './shared.mjs';
 import { checkRequirements, installBrowsers, OS_NAMES } from './setup.mjs';
-import { issueUrl } from './issue.mjs';
+import { issueUrl, reportUrl, cleaner } from './issue.mjs';
+import { stamp as stampStep } from './steps.mjs';
 import { release as osRelease, freemem } from 'node:os';
 import { spawn } from 'node:child_process';
 import { aiStep, replayStep, guideCollector, buildGuidePdf, rewriteGuide, secretMasker, runTitle, entersValue, guideFolder, readGuideDoc, cleanGuideDoc, renderGuidePdf, FRAME_FILE, frameType, guideFrames, addGuideFrame, pruneGuideFrames } from './guide.mjs';
-import { finishVideo } from './video.mjs';
+import { finishVideo, segments, videoTime } from './video.mjs';
 import { GUIDE_LANGS, guideLabels, translateStep } from './guide-i18n.mjs';
 import { validWorkflow, fillRefs, loopItems, blockPrompt, readAnswer, SYSTEM as WF_SYSTEM } from './workflow.mjs';
 
@@ -409,7 +411,9 @@ async function runOnStage(res, { kind, record, guide, label, project, provider }
   let recorder;
   const steps = guide || record ? guideCollector(stage.currentFrame, () => recorder?.at()) : null; // PDF steps, video captions
   const mask = secretMasker(projectSecrets(project));
-  const addGuideStep = step => { if (!steps) return; if (step && !step.section) step.detail = mask(step.detail ?? ''); steps.add(step); };
+  // returns a step's index among the guide's steps (g): the run page finds its screenshot and video moment by it
+  let guideN = 0;
+  const addGuideStep = step => { if (!steps) return; if (step && !step.section) step.detail = mask(step.detail ?? ''); steps.add(step); if (step && !step.section) return guideN++; };
   const stopBoxes = steps ? stage.onHighlight((frame, info) => steps.highlight(frame, info)) : null;
   // console errors / failed requests seen during the run; repeats are counted, not listed again
   entry.issues = [];
@@ -454,6 +458,9 @@ async function runOnStage(res, { kind, record, guide, label, project, provider }
         const captions = done.filter(s => !s.section).map(s => ({ n: ++n, at: s.at, text: s.text ?? translateStep(s.what, lang), zoom: s.box?.zoom, hold: entersValue(s.what) })).filter(c => c.at !== undefined);
         const cardErr = await finishVideo(join(recordingsDir, video), { ...rec, title: texts.title || runTitle(entry, guideLabels(lang).suite), app: meta.app || meta.name, logo: projectLogoDataUrl(project) || logoDataUrl(), accent, captions });
         if (cardErr) send('log', `Title card and captions skipped: ${cardErr}`);
+        // each guide step's second in the finished video (title card first, quiet stretches sped up): the run page jumps there
+        const segs = segments(captions);
+        entry.stepVideo = done.filter(s => !s.section).map(s => s.at === undefined ? null : Math.round((cardErr ? s.at : videoTime(segs, s.at)) * 10) / 10);
         entry.video = video; send('video', `/recordings/${video}`);
       }
     }
@@ -470,9 +477,10 @@ async function runOnStage(res, { kind, record, guide, label, project, provider }
   }
 }
 
-function aiRun(res, { project, url, title, task, provider, model, record, guide, session, flow, env, expected, files = [], prompt }) {
+function aiRun(res, { project, url, title, task, provider, model, record, guide, session, flow, env, expected, files = [], prompt, editTest }) {
   return withRun(res, { kind: 'ai', record, guide, label: provider.id, project, provider, locks: dbLock(project, env) }, async ({ send, signal, entry, rec, runDir, stage, startRecording, addGuideStep }) => {
-    Object.assign(entry, { url, title: title || undefined, task, prompt: prompt || undefined, provider: provider.label, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, ...(files.length && { files }), steps: [] });
+    Object.assign(entry, { url, title: title || undefined, task, prompt: prompt || undefined, provider: provider.label, providerId: provider.id, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, ...(files.length && { files }),
+      recordAsked: record, guideAsked: guide, editOf: editTest || undefined, steps: [] }); // the asked-for options (entry.guide becomes the PDF's name); editOf: Edit in Run AI
     markRunning(entry);
     await resetDatabase(project, env, line => send('text', line));
     const startUrl = makeResolver({ vars: env.vars }).fill(url); // {{baseUrl}} in the URL field
@@ -483,7 +491,7 @@ function aiRun(res, { project, url, title, task, provider, model, record, guide,
     startRecording();
     const secrets = projectSecrets(project);
     const envVarNames = Object.keys(env.vars);
-    const prompt = [
+    const instructions = [ // not "prompt": that is the saved prompt's id above
       `URL: ${startUrl}`,
       envVarNames.length && `Environment "${env.name}" values you can use: ${envVarNames.map(n => /^https?:\/\//.test(env.vars[n]) ? `{{${n}}} (= ${env.vars[n]})` : `{{${n}}}`).join(', ')}. Built-in values: {{today}}, {{today+N}}, {{today-N}}, {{now}}, {{random}}.`,
       sessionData && `The browser starts with a saved login session ("${session}"), so you may already be logged in.`,
@@ -494,11 +502,11 @@ function aiRun(res, { project, url, title, task, provider, model, record, guide,
       expected && `Expected result (check it yourself on screen after the task):\n${expected}\n\nRight after the RESULT line, write exactly "EXPECTED: MET" or "EXPECTED: NOT MET", then what you actually saw. RESULT is SUCCESS only if the expected result is met. The test you write must assert this expected result.`,
     ].filter(Boolean).join('\n\n');
     const emit = (type, data) => {
-      if (type === 'tool') { if (entry.steps.length < 300) entry.steps.push(data); addGuideStep(aiStep(data)); }
+      if (type === 'tool') { const g = addGuideStep(aiStep(data)); data = { ...stampStep(data, entry.started), ...(g !== undefined && { g }) }; if (entry.steps.length < 300) entry.steps.push(data); }
       send(type, data);
     };
     const { text } = await engines[provider.engine]({
-      provider, model: model || provider.model, prompt, system: SYSTEM, ...mcp, cwd: dir, codebase: codebaseOf(project),
+      provider, model: model || provider.model, prompt: instructions, system: SYSTEM, ...mcp, cwd: dir, codebase: codebaseOf(project),
     }, emit, signal);
     let { evidence, script } = splitAnswer(text), scriptFrom;
     // no test in the answer (a task with its own report format, say): one from the code the browser actually ran
@@ -520,10 +528,17 @@ async function playTests(files, { project, rec, session, storageFile, testDir, t
   const watching = stage.watchReplayBrowser(cdpPort, rec, watchSignal).then(() => { if (!watchSignal.aborted) startRecording(); });
   entry.log ??= []; entry.replaySteps ??= [];
   const onLine = line => { if (entry.log.length < 500) entry.log.push(line); send('log', line); };
+  let testHead = null; // the running test's heading: its result goes on it (the run page marks its steps ✓/✗)
   const onStep = raw => {
-    const step = replayStep(raw, mask);
-    addGuideStep(step);
-    if (step && entry.replaySteps.length < 500) { entry.replaySteps.push(step); send('step', step); }
+    if (raw.category === 'plan') { entry.planned = raw.total; return send('plan', { tests: raw.total }); } // the run page's "Test X of Y"
+    if (raw.category === 'test-end') { if (testHead) testHead.status = raw.status; return; }
+    let step = replayStep(raw, mask);
+    const g = addGuideStep(step);
+    if (step && !step.section) step = { ...stampStep(step, entry.started), ...(g !== undefined && { g }) };
+    if (step?.level === 1) testHead = step;
+    const keep = entry.replaySteps.length < 500;
+    if (step && keep) entry.replaySteps.push(step);
+    if (step && (keep || step.level === 1)) send('step', step); // past the cap test headings still go out: "Test X of Y" keeps counting
   };
   let result;
   try { result = await runTests(files, { ...rec, cdpPort, outputDir: join(runDir, `replay-${Date.now()}`), sessionFile: storageFile ?? pickSession(project, session), secrets: projectSecrets(project), apiKeyEnvs: loadProviders().map(pr => pr.apiKeyEnv).filter(Boolean), testDir, testDataDir, testFilesDir, dbUrl, vars, envName, repeatEach, dataRows, updateSnapshots }, { onLine, onStep }, signal); }
@@ -725,7 +740,7 @@ function workflowRun(res, { project, wf, params, env, session, record, guide, pr
           if (url) { noProduction(url); entry.url ??= url; } // the PDF guide's "Website": the first address opened
           const prompt = blockPrompt({ ...b, prompt: fillRefs(b.prompt, wctx) }, { url, secrets, envVars: Object.keys(env.vars) });
           const emit = (type, data) => {
-            if (type === 'tool') { if (entry.steps.length < 500) entry.steps.push({ ...data, block: index }); addGuideStep(aiStep(data)); }
+            if (type === 'tool') { const g = addGuideStep(aiStep(data)); if (g !== undefined) data = { ...data, g }; if (entry.steps.length < 500) entry.steps.push({ ...data, block: index }); }
             send(type, data);
           };
           const { text } = await engines[provider.engine]({ provider, model: model || provider.model, prompt, system: WF_SYSTEM, ...mcp, cwd: dir, codebase: codebaseOf(project) }, emit, signal);
@@ -838,7 +853,7 @@ async function route(req, res) {
 
   // the page itself: it shows the login screen when there is no session
   if (p === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-abr-folder': encodeURIComponent(join(dir, '..')), 'set-cookie': `abr_page=${pageToken}; HttpOnly; SameSite=Strict; Path=/` }); return res.end(readFileSync(join(dir, 'index.html'))); }
-  const STATIC = { '/shared.mjs': 'text/javascript', '/app.js': 'text/javascript', '/studio.js': 'text/javascript', '/app.css': 'text/css' };
+  const STATIC = { '/shared.mjs': 'text/javascript', '/app.js': 'text/javascript', '/studio.js': 'text/javascript', '/time.mjs': 'text/javascript', '/app.css': 'text/css' };
   if (STATIC[p]) { res.writeHead(200, { 'content-type': `${STATIC[p]}; charset=utf-8` }); return res.end(readFileSync(join(dir, p.slice(1)))); }
   // the app's own fonts (app/fonts), so the page looks right offline
   const fontMatch = p.match(/^\/fonts\/([a-z0-9-]+\.woff2)$/);
@@ -952,6 +967,50 @@ async function route(req, res) {
     const mode = process.env.ABR_DESKTOP ? 'desktop app' : process.env.ABR_PORTABLE ? 'portable' : 'from source';
     return json(res, { url: issueUrl({ version, os: `${OS_NAMES[process.platform] ?? process.platform} ${osRelease()} ${process.arch}`, mode, log }) });
   }
+  // Report a problem: the page's preview (cleaned log) and Send (a folder of attachments + a filled-in issue link)
+  const reportInfo = () => {
+    let log = ''; try { log = readFileSync(logPath, 'utf8').slice(-60_000); } catch {}
+    return { log, version: process.env.ABR_VERSION || JSON.parse(readFileSync(join(dir, '..', 'package.json'), 'utf8')).version,
+      os: `${OS_NAMES[process.platform] ?? process.platform} ${osRelease()} ${process.arch}`, mode: process.env.ABR_DESKTOP ? 'desktop app' : process.env.ABR_PORTABLE ? 'portable' : 'from source' };
+  };
+  // the user's own words as they will leave: secrets marked, for the preview while typing
+  if (p === '/report/preview' && m === 'POST') {
+    const b = await readBody(req), mark = cleaner(process.env, undefined, '[secret removed]');
+    const run = b.runId ? getRun(String(b.runId)) : null;
+    return json(res, { title: mark(String(b.title ?? '')), text: mark(String(b.text ?? '')), runTitle: run ? mark(run.title || (run.task ?? '').split('\n')[0]) : '', env: run?.env ? mark(run.env) : '' });
+  }
+  if (p === '/report/preview' && m === 'GET') {
+    const { log, version, os, mode } = reportInfo();
+    return json(res, { version, os, mode, log: cleaner(process.env, undefined, '[secret removed]')(log).split('\n').filter(Boolean).slice(-200) });
+  }
+  if (p === '/report' && m === 'POST') {
+    const b = await readBody(req, 15_000_000); // a screenshot of the window as a data URL
+    const title = typeof b.title === 'string' ? b.title.trim() : '', text = typeof b.text === 'string' ? b.text.trim() : '';
+    if (!title || title.length > 90) throw denied('Add a short title (at most 90 characters)', 400);
+    if (text.length < 15 || text.length > 10_000) throw denied('Describe the problem in a sentence or two (15 to 10,000 characters)', 400);
+    if (b.screenshot !== undefined && !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(String(b.screenshot))) throw denied('The screenshot must be a PNG', 400);
+    const shot = b.screenshot ? Buffer.from(b.screenshot.split(',')[1], 'base64') : null;
+    if (shot && shot.length > 10 * 1024 * 1024) throw denied('The screenshot is too large', 400);
+    const run = b.runId ? getRun(String(b.runId)) : null;
+    const clean = cleaner(), info = reportInfo();
+    const reports = join(dataDir, 'reports');
+    pruneOlder(reports, 30 * 86_400_000);
+    const folder = join(reports, new Date().toISOString().replace(/[:.]/g, '-'));
+    mkdirSync(folder, { recursive: true });
+    const files = [], missing = [];
+    writeFileSync(join(folder, 'report.txt'), `${clean(title)}\n\n${clean(text)}\n`); // the full text, when the link has to cut it
+    if (b.log) writeFileSync(join(folder, 'app-log.txt'), clean(info.log).split('\n').slice(-201).join('\n'));
+    if (b.video && run?.video) {
+      const src = join(recordingsDir, String(run.video).replace(/[\\/]/g, ''));
+      const name = `run-${String(run.id).replace(/[^\w-]/g, '')}${extname(run.video)}`;
+      if (existsSync(src)) { copyFileSync(src, join(folder, name)); files.push(name); } else missing.push(run.video);
+    }
+    if (shot) { writeFileSync(join(folder, 'screenshot.png'), shot); files.push('screenshot.png'); }
+    const project = run?.project ? (() => { try { return readProject(run.project).name; } catch { return run.project; } })() : '';
+    const url = reportUrl({ title, text, run: run && { id: run.id, title: run.title || (run.task ?? '').split('\n')[0], status: run.status, when: new Date(run.started).toISOString().slice(0, 16).replace('T', ' ') },
+      env: run?.env, project, ...info, log: b.log ? info.log : '', files: ['report.txt', ...(b.log ? ['app-log.txt'] : []), ...files] }, clean);
+    return json(res, { url, folder, files, ...(missing.length && { missing }) });
+  }
   if (p === '/setup/status' && m === 'GET') return json(res, { os: process.platform, osName: OS_NAMES[process.platform] ?? process.platform, portable: Boolean(process.env.ABR_PORTABLE), items: await checkRequirements({ root: join(dir, '..') }) });
   if (p === '/setup/browsers' && m === 'GET') { // download Chromium, the installer's lines streamed
     if (browsersInstalling) throw new Error('Chromium is already being downloaded');
@@ -1052,6 +1111,36 @@ async function route(req, res) {
     if (!file && m === 'POST') return json(res, { name: saveTestFile(project, t, q('name'), await readRaw(req)) });
     if (file && m === 'DELETE') { deleteTestFile(project, t, decodeURIComponent(file)); res.writeHead(204); return res.end(); }
   }
+  // Edit in Run AI (test-sources.mjs): the form that made a test, its files as fresh uploads, and Update from a run
+  const srcMatch = p.match(/^\/tests\/([a-z0-9-]+)\/(source|use-files|from-run)$/);
+  if (srcMatch) {
+    projectDir(project);
+    const [, t, what] = srcMatch;
+    if (!existsSync(testPath(project, t))) throw denied(what === 'from-run' ? `Test "${t}" no longer exists: save the run as a new test` : `Test "${t}" not found`, 404);
+    if (what === 'source' && m === 'GET') {
+      const saved = readSource(project, t);
+      if (saved) return json(res, { source: saved, from: 'saved' });
+      const code = readTest(project, t), vars = urlVars();
+      // a test saved before 1.6.0: the newest AI run of this project whose script saved the same way gives this file
+      for (const r of aiScriptRuns(project))
+        if (r.task && prepareScript(r.script, { urlVars: vars }) === code) return json(res, { source: sourceFromRun(r), from: 'history' });
+      return json(res, { source: sourceFromCode(code, t), from: 'code' });
+    }
+    if (what === 'use-files' && m === 'POST')
+      return json(res, Object.entries(filesIn(testFilesDir(project, t))).map(([name, path]) => ({ ...saveUpload(uploadsDir, name, readFileSync(path)), size: statSync(path).size })));
+    if (what === 'from-run' && m === 'PUT') {
+      const run = getRun((await readBody(req)).runId); runOr404(run);
+      if (run.kind !== 'ai' || run.project !== project) throw denied('Only an AI run of this project can update its test', 400); // a replay has no form or files to give
+      if (!run.script) throw new Error('This run has no test script');
+      saveTest(project, t, run.script, true, { urlVars: urlVars() });
+      saveSource(project, t, sourceFromRun(run));
+      // the run's files become the test's files; an upload expired since keeps the test's own copy
+      const dir = testFilesDir(project, t), names = new Set((run.files ?? []).map(f => f.name));
+      for (const old of Object.keys(filesIn(dir))) if (!names.has(old)) rmSync(join(dir, old));
+      const missing = copyUploads(uploadsDir, run.files ?? [], dir).filter(n => !existsSync(join(dir, n)));
+      return json(res, { name: t, ...(missing.length && { missingFiles: missing }) });
+    }
+  }
   if (p === '/uploads' && m === 'POST') return json(res, saveUpload(uploadsDir, q('name'), await readRaw(req)));
   if (p === '/tests' || testMatch || dataMatch) projectDir(project);
   if (p === '/tests' && m === 'GET') return json(res, listTests(project));
@@ -1062,6 +1151,7 @@ async function route(req, res) {
     if (!script) throw new Error('This run has no test script');
     const saved = saveTest(project, slug(name), script, overwrite, { urlVars: urlVars() });
     const missing = run?.files?.length ? copyUploads(uploadsDir, run.files, testFilesDir(project, saved)) : [];
+    if (run?.kind === 'ai' && run.task) saveSource(project, saved, sourceFromRun(run)); // Edit in Run AI opens it again
     return json(res, { name: saved, ...(missing.length && { missingFiles: missing }) });
   }
   if (testMatch && m === 'GET') { const code = readTest(project, testMatch[1]); res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); return res.end(code); }
@@ -1204,8 +1294,9 @@ async function route(req, res) {
       noProduction(makeResolver({ vars: env.vars }).fill(url));
       const flow = q('flow'); if (flow) flowScript(flow); // validates before streaming
       const files = pickUploads(uploadsDir, q('files'));
+      if (q('check') === '1') { res.writeHead(204); return res.end(); } // the form asks first: everything above passed
       sse(res);
-      return aiRun(res, { project, files, url, title: q('title').trim().slice(0, 100), task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim(), prompt: promptExists(project, q('prompt')) ? q('prompt') : undefined });
+      return aiRun(res, { project, files, url, title: q('title').trim().slice(0, 100), task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim(), prompt: promptExists(project, q('prompt')) ? q('prompt') : undefined, editTest: testExists(project, q('editTest')) ? q('editTest') : undefined });
     }
     const names = q('tests').split(',').filter(Boolean);
     if (!names.length) throw new Error('Select at least one test');

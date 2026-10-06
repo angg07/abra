@@ -2,7 +2,7 @@
 // portable build, run by the Node shipped in resources/runtime. Its code is copied into the user's data folder
 // (the install folder may be read-only), where the user's projects, history, videos, settings and .env live too;
 // an update replaces the code and never those.
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -88,12 +88,22 @@ function stopServer() {
   else server.kill();
 }
 
+// Report a problem (preload.cjs): a screenshot of the window, and opening a report's folder; only folders under
+// the app's reports folder, so the page cannot ask Electron to open anything else
+const reportsDir = path.join(home, 'app', 'data', 'reports');
+ipcMain.handle('abra:capture', async e => (await e.sender.capturePage()).toDataURL());
+ipcMain.handle('abra:show-folder', async (e, folder) => {
+  const p = path.resolve(String(folder ?? ''));
+  if (!p.startsWith(reportsDir + path.sep)) return 'not a report folder';
+  return shell.openPath(p);
+});
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1440, height: 900, minWidth: 900, minHeight: 600, show: false, title: 'ABRA',
     backgroundColor: '#0B0D10', autoHideMenuBar: true,
     ...(process.platform === 'linux' && { icon: path.join(__dirname, 'build', 'icon.png') }),
-    webPreferences: { contextIsolation: true, sandbox: true },
+    webPreferences: { contextIsolation: true, sandbox: true, preload: path.join(__dirname, 'preload.cjs') },
   });
   win.once('ready-to-show', () => win.show());
   // PDF guides, reports: a window of the app (it has the page's cookie); anything else: the user's browser

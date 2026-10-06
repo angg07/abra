@@ -134,6 +134,7 @@ export function deleteTest(project, name) {
   rmSync(dataOf(project, name), { force: true });
   rmSync(join(dirname(file), 'files', name), { recursive: true, force: true }); // its upload files (test-files.mjs)
   rmSync(`${file}-snapshots`, { recursive: true, force: true });
+  rmSync(join(dirname(file), 'sources', `${name}.json`), { force: true }); // its Run AI source (test-sources.mjs)
 }
 
 // Data set for a test: tests/<project>/data/<name>.csv (header row + one row per run)

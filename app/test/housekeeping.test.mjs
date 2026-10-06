@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdtempSync, rmSync, utimesSync, readdirSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync, utimesSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pruneDir } from '../housekeeping.mjs';
+import { pruneDir, pruneOlder } from '../housekeeping.mjs';
 
 test('keeps the newest files of one kind, leaves other files alone', () => {
   const d = mkdtempSync(join(tmpdir(), 'prune-'));
@@ -17,4 +17,13 @@ test('keeps the newest files of one kind, leaves other files alone', () => {
   assert.deepEqual(readdirSync(d).sort(), ['guide.pdf', 'v0.mp4', 'v1.mp4']);
   assert.deepEqual(pruneDir(join(d, 'missing'), 2, '.mp4'), []);
   rmSync(d, { recursive: true });
+});
+
+test('pruneOlder deletes only the folders older than the limit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abr-old-'));
+  try {
+    for (const [name, daysAgo] of [['old', 31], ['new', 2]]) { mkdirSync(join(dir, name)); const t = new Date(Date.now() - daysAgo * 86_400_000); utimesSync(join(dir, name), t, t); }
+    assert.deepEqual(pruneOlder(dir, 30 * 86_400_000), ['old']);
+    assert.deepEqual(readdirSync(dir), ['new']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

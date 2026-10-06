@@ -46,7 +46,7 @@ test('broken', async ({ page }) => { await page.setContent('<p>10</p>'); await e
   assert.match(await card.textContent(), /1 of 1 tests passed/);
   await card.locator('[data-act=open]').click(); // Open result: the full result, as from History
   await page.locator('#result').waitFor();
-  assert.match(await page.locator('#result h2').textContent(), /Passed/);
+  assert.match(await page.locator('#result .result-top b').textContent(), /Passed/);
   assert.equal(await page.locator('#summaries .summary').count(), 0); // opening it closes the card
 
   // a background run you peek at through its chip and then leave still ends in a card; × closes it

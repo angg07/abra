@@ -64,6 +64,19 @@ export function segments(captions) {
   return withHolds(out, captions);
 }
 
+// A second of the recording → the same moment in the finished video: after the title card, through the sped-up and held stretches
+export const CARD_S = 3;
+export function videoTime(segs, at, card = CARD_S) {
+  let t = card;
+  for (const g of segs) {
+    if (g.freeze) { if (at > g.start) t += g.freeze; continue; }
+    const rate = g.fast ? SPEED : 1, end = g.end ?? Infinity;
+    if (at < end) return t + Math.max(0, at - g.start) / rate;
+    t += (end - g.start) / rate;
+  }
+  return t;
+}
+
 // A value typed or picked shows in one frame (Playwright fills a field at once): after such a step the picture
 // stands still for HOLD_S seconds, HOLD_AT seconds after the step (the value is in), so it can be read.
 export const HOLD_S = 1.5, HOLD_AT = 0.3;
@@ -126,7 +139,7 @@ export function captionText(text) {
 // captions: [{ n, at (seconds into the recording), text, zoom?, hold? (a value was entered) }], each shown until the next one starts.
 // ponytail: the whole run is re-encoded (a few seconds per recorded minute); encode only the card and
 // concat with -c copy if long recordings make this wait noticeable.
-export async function finishVideo(video, { width, height, fps = 10, seconds = 3, captions = [], ...card }) {
+export async function finishVideo(video, { width, height, fps = 10, seconds = CARD_S, captions = [], ...card }) {
   const tmp = i => `${video}.${i}.png`, out = `${video}.tmp.mp4`;
   const pngs = [tmp('card'), ...captions.map((_, i) => tmp(i)), tmp('speed')];
   const browser = await chromium.launch({ headless: true });
@@ -164,7 +177,7 @@ export async function finishVideo(video, { width, height, fps = 10, seconds = 3,
     chain += `${last}split=${segs.length}${segs.map((_, i) => `[s${i}]`).join('')};`;
     segs.forEach((g, i) => {
       // one frame, shown for g.freeze seconds
-      if (g.freeze) { chain += `[s${i}]trim=start=${g.start.toFixed(2)},setpts=PTS-STARTPTS,trim=end_frame=1,tpad=stop_mode=clone:stop_duration=${g.freeze}[p${i}];`; return; }
+      if (g.freeze) { chain += `[s${i}]trim=start=${g.start.toFixed(2)},setpts=PTS-STARTPTS,trim=end_frame=1,tpad=stop_mode=clone:stop_duration=${(g.freeze - 1 / fps).toFixed(3)}[p${i}];`; return; }
       chain += `[s${i}]trim=start=${g.start.toFixed(2)}${g.end === undefined ? '' : `:end=${g.end.toFixed(2)}`},setpts=(PTS-STARTPTS)${g.fast ? `/${SPEED}` : ''}`;
       chain += g.fast ? `[t${i}];[t${i}]${speedIn}overlay=${width - badge * 2 - 24}:24[p${i}];` : `[p${i}];`;
     });

@@ -39,7 +39,7 @@ test('a run left running by a killed app is interrupted at the next start, and i
     await page.locator(`#historyList button.item[data-id="${ID}"]`).click();
     const result = page.locator('#result');
     await result.waitFor();
-    assert.match(await result.locator('h2').textContent(), /Interrupted/);
+    assert.match(await result.locator('.result-top b').textContent(), /Interrupted/);
     assert.doesNotMatch(await result.textContent(), /undefined/);
   } finally { await browser.close(); }
 });

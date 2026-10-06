@@ -22,7 +22,7 @@ test('Edit test › Files uploads, lists and deletes files', async () => {
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.goto(`${app.base}/#/p/${P}`);
   await page.locator('nav.views [data-view=tests]').click();
-  await page.locator('#testList .item[data-name=claim] [data-act=menu]').click();
+  await page.locator('#testList .item[data-name=claim] [data-act=more]').click();
   await page.locator('#testList .item[data-name=claim] .menu [data-act=edit]').click();
   await page.locator('#editFileIn').setInputFiles([
     { name: 'Template Klaim.xlsx', mimeType: 'application/octet-stream', buffer: Buffer.from('x') },

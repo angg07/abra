@@ -115,13 +115,15 @@ The app is developed on Linux. On Windows, check once:
 
 The app opens on **Projects**: one per application you test (e.g. a web shop and its admin panel). Each project has its own
 saved tests (`tests/<project>/`) and history; its optional start URL and default environment are filled in
-for you. Providers, secrets, login sessions, environments and schedules are shared by all projects.
+for you. An environment you pick in a form is remembered for the project until you change its default environment
+(the pencil on its card, or **Edit project** in the project menu). Providers, secrets, login sessions, environments and
+schedules are shared by all projects.
 
 | Tab | What it does |
 |---|---|
 | **Run AI** | URL + instructions in plain language. The AI (Claude Code, or any OpenAI-compatible API) drives the browser. Under the instructions, **Insert** chips type an environment value, a secret (🔒, the AI sees only the name), `{{today}}` or `{{random}}` at the cursor; the counter shows the length (at most 10,000 characters). **Title and files** folds away the optional title and upload files. **Run settings** sums up AI, environment and output; **Change settings** opens the choices (AI, model, login session, environment, video, PDF guide, Show the browser). |
 | **Record flow** | Opens Playwright codegen on your desktop. Click through the flow, close the window, then copy the script, save it as a test, or give it to the AI as a route map. |
-| **Saved tests** | Plain `@playwright/test` files in `tests/<project>/`, replayed without AI. A test that never ran shows **▶**; every row has a **⌄** menu with Run, Edit, Show code and Delete, and **View last result** opens its last run. Tick tests and a **suite bar** appears with the login session, environment, repeat, Video, PDF and Show browser, plus **Run N tests**; these choices also apply to ▶ and Run. **Edit** opens the script and its CSV data set. A failing test gets **Fix with AI**. Files: templates and documents a test uploads live in `tests/<project>/files/<test>/` (Edit test › Files, 20 MB each); the script uses `setInputFiles('{{file.name}}')`. Files added to a Run AI are kept with the test when you save it. |
+| **Saved tests** | Plain `@playwright/test` files in `tests/<project>/`, replayed without AI. A test that never ran shows **▶**; every row has a **⌄** menu with Run, Edit, Show code and Delete, and **View last result** opens its last run. Tick tests and a **suite bar** appears with the login session, environment, repeat, Video, PDF and Show browser, plus **Run N tests**; these choices also apply to ▶ and Run. **Edit** opens the script and its CSV data set. **Edit in Run AI** (row menu, or the Edit test dialog) opens the Run AI form the test was made from, its files included; change it, press Run AI, then **Update <test>** on the result overwrites the test (its CSV data set stays). A test saved before 1.6.0 gets its form from History, or only its first URL when no run matches. A failing test gets **Fix with AI**. Files: templates and documents a test uploads live in `tests/<project>/files/<test>/` (Edit test › Files, 20 MB each); the script uses `setInputFiles('{{file.name}}')`. Files added to a Run AI are kept with the test when you save it. |
 | **Workflows** | Blocks chained in one browser, edited in Workflow Studio (below). |
 | **History** | Every run with its result, steps, errors, video, PDF guide and HTML report. **All / Passed / Failed** show their counts; each row says what ran (AI run, Replay, Suite, Workflow, Fix), how many steps, and who ran it (the AI, Playwright or a schedule). |
 
@@ -138,18 +140,22 @@ saved prompts needs ABRA 1.3.0 or newer to import).
 
 ### Workflows
 
-**Workflows > New workflow** opens Workflow Studio: blocks in a vertical chain on a canvas, the chosen block's
-settings on the right, **+** between blocks to add one, drag to reorder, and a JSON view. All blocks run in one
-browser, so a login or an open page carries over. Stored as `tests/<project>/workflows/<id>.json`.
+**Workflows > New workflow** (or **Edit** on a row) opens Workflow Studio as a page: **Add a block** on the left
+adds below the selected block (inside a selected Loop, unless it is a Loop itself), the chain in the middle shows each
+block's main setting, and the chosen block's settings are on the right, with **More options** (name, key, a URL to
+open first, continue on failure), **↑ Up**, **↓ Down** and **Remove**. With no block selected, the right side holds the
+workflow's description and parameters. **⋯** has **Show JSON** (edit the whole workflow) and **Delete workflow**.
+**Run options** on the Workflows page sets the login session, environment, Video and PDF for **Run**. All blocks run in
+one browser, so a login or an open page carries over. Stored as `tests/<project>/workflows/<id>.json`.
 
 | Block | Does |
 |---|---|
-| **AI Task** | the AI does a task in the browser, optionally opening a URL first |
+| **AI task** | the AI does a task in the browser, optionally opening a URL first |
 | **Extract** | the AI reads the page into typed fields (`string`, `number`, `boolean`, `list`); `Rp 1.250.000` reads as 1250000 |
-| **Validate** | the AI checks a condition on the page without changing anything: pass or fail |
+| **Check** | the AI checks a condition on the page without changing anything: pass or fail |
 | **Saved test** | runs a saved Playwright test (no AI) with the browser's login |
 | **Loop** | runs the blocks inside once per CSV row, or per item of an earlier list |
-| **HTTP request** | calls an API (production is blocked; on a shared server only environment addresses) |
+| **API call** | calls an API (production is blocked; on a shared server only environment addresses) |
 
 Blocks use earlier results: `{{params.member}}` (asked when the run starts), `{{blocks.order.orderNo}}` (a field of
 the block with key `order`), `{{item}}` / `{{item.column}}` inside a loop, plus the usual `{{appUrl}}`,
@@ -172,7 +178,8 @@ Write these in instructions, URLs and tests; they are filled in when the step ru
 | `{{ADMIN_PASS}}` | a secret: typed into the browser, never shown to the AI |
 
 Saved tests use them through `fill('...')` from `tests/support/vars.ts`; the app adds those calls when it
-saves a test. A test with a data set runs once per row when replayed on its own.
+saves a test. They also work in a constant at the top of the file, except `{{data.…}}` and `{{file.…}}`,
+which need a running test. A test with a data set runs once per row when replayed on its own.
 
 ### Production is blocked
 
@@ -245,6 +252,33 @@ PostgreSQL uses `$1`, MySQL `?`. Every query runs in a READ ONLY transaction tha
 **Settings > Schedules**: run saved tests at a set time on chosen days (they queue like your own runs). The
 result goes to Telegram (message + HTML report; secret `TELEGRAM_TOKEN` + chat id) and/or Slack (secret
 `SLACK_WEBHOOK`). The app must be running at that time; a run missed by up to 30 minutes still starts.
+
+### Pages, addresses and runs
+
+Every page has its own address (`#/p/<project>/tests`, `#/p/<project>/run/<run id>`, `#/settings`, …): bookmark it, share
+it, refresh it, and the browser's **Back** and **Forward** move between pages. The project switcher keeps the page you
+are on. While a run goes on, its page shows how far it is (**Test 2 of 6** for replays, the number of steps for an AI run)
+and **Back** leaves it running as a chip in the sidebar. Click a step to see that moment: its screenshot when the run made
+a PDF guide, otherwise the video jumps there. **Stop** keeps the last screen and sums up what was done.
+
+Confirmations (delete, leave with unsaved changes) are ABRA's own dialog; deleting a project asks you to type its name.
+**New project** asks only for a name, a start URL and an environment; everything else is in **Edit project**.
+
+### Requirements and Report a problem
+
+**Requirements** (sidebar) lists what this computer needs: the required tools (Node.js, Chromium) and the optional
+ones (ffmpeg for videos, Claude Code), each with what it needs, what was found and why; a command to copy where one
+helps, and **Install** for Chromium. The sidebar badge counts the tools that need attention. On the very first start the
+same page shows **Continue**.
+
+**Report a problem** (sidebar, or **⋯ › Report a problem with this run** on a run) is a form: a title, what happened, an
+optional run, and what to attach (the app log's last 200 lines, the run's video, a screenshot of ABRA in the desktop
+app). **What will be sent** shows the issue as you type, secrets removed. **Send to GitHub** opens a filled-in GitHub
+issue and puts the attachments in a folder (`app/data/reports/<time>/`, kept 30 days): drag them into the issue, since a
+link cannot carry files.
+
+On a phone, a bar at the bottom holds Projects, Run AI, Tests, History and **More** (the full menu). Press **N** anywhere
+outside a text field to open Run AI.
 
 ### PDF guides for users and clients
 

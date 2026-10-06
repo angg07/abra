@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { finishVideo, titleCardHtml, captionHtml, segments, zoomRect, captionText, zoomStretches } from '../video.mjs';
+import { finishVideo, titleCardHtml, captionHtml, segments, zoomRect, captionText, zoomStretches, videoTime } from '../video.mjs';
 
 const seconds = f => Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', f]).toString());
 
@@ -124,4 +124,28 @@ test('zoom: fields filled one after another in the same form stay zoomed (one st
   assert.deepEqual(s.map(x => [x.a, x.b]), [[1, 4], [10, 14]]);
   // a gap between two steps in the same form: two stretches, each fading in and out
   assert.equal(zoomStretches([{ at: 1, zoom: form }, { at: 9 }, { at: 10, zoom: form }], 1280, 800).length, 2);
+});
+
+test('a step\'s second in the finished video: after the 3 s card, sped-up gaps shortened, holds added', () => {
+  // steps at 1 s and 20 s: 0–3 kept, 3–20 at 4x (4.25 s), then normal
+  const segs = segments([{ at: 1 }, { at: 20 }]);
+  assert.equal(videoTime(segs, 1), 4);
+  assert.equal(videoTime(segs, 20), 3 + 3 + 17 / 4);
+  // a typed value at 1 s holds 1.5 s at 1.3 s: a step after it comes 1.5 s later
+  const held = segments([{ at: 1, hold: true }, { at: 3 }]);
+  assert.equal(videoTime(held, 1), 4);
+  assert.equal(videoTime(held, 3), 3 + 3 + 1.5);
+});
+
+test('two holds: the finished video is as long as videoTime says (run page jumps land on their step)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abr-video-'));
+  const video = join(dir, 'run.mp4');
+  try {
+    execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x200:r=10', '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', video]);
+    const captions = [{ n: 1, at: 0.5, text: 'a', hold: true }, { n: 2, at: 1.5, text: 'b', hold: true }, { n: 3, at: 3, text: 'c' }];
+    assert.equal(await finishVideo(video, { width: 320, height: 200, fps: 10, title: 't', captions }), null);
+    // the recording's end (4 s) → card 3 + 4 + two holds of 1.5
+    assert.equal(videoTime(segments(captions), 4), 10);
+    assert.ok(Math.abs(seconds(video) - 10) < 0.15, `duration ${seconds(video)}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

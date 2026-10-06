@@ -20,6 +20,9 @@ export function patchRun(id, patch) {
   if (r) save(Object.assign(r, patch));
 }
 
+// the AI runs of a project that wrote a script, newest first (Edit in Run AI looks for the one a test came from)
+export const aiScriptRuns = project => db.prepare("SELECT data FROM runs WHERE project = ? AND json_extract(data, '$.kind') = 'ai' AND json_extract(data, '$.script') IS NOT NULL ORDER BY started DESC")
+  .all(project).map(({ data }) => JSON.parse(data));
 export const getRun = id => { const row = db.prepare('SELECT data FROM runs WHERE id = ?').get(id); return row ? JSON.parse(row.data) : undefined; };
 
 export const INTERRUPTED = 'The app closed during this run (for example, the computer ran out of memory).';

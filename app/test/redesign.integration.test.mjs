@@ -45,7 +45,7 @@ test('Projects: stats come from the data, cards show pass rate, counts and actio
   assert.equal(await stat(2), '1'); // zz-rd-fail's last run failed
   assert.equal(await stat(3), '0');
   const card = page.locator('.project[data-id=zz-rd]');
-  assert.match(await card.textContent(), /Pass rate · last 3 runs/);
+  assert.match(await card.textContent(), /Pass rate · 3 runs/);
   assert.equal(await card.locator('.meter-top b').textContent(), '67%');
   assert.match(await card.textContent(), /3 tests/);
   assert.match(await card.textContent(), /1 workflow(?!s)/);
@@ -101,19 +101,16 @@ test('Saved tests: ▶ for a new test, the row menu, View last result and the su
   assert.match(await ran.textContent(), /3 steps · 4s · View last result/);
   assert.equal(await page.locator('#testList .item[data-name=fresh] [data-act=run]').count(), 1); // ▶
   assert.equal(await ran.locator('[data-act=run]').count(), 0);
-  await ran.locator('[data-act=menu]').click();
-  assert.deepEqual(await ran.locator('.menu [data-act]').evaluateAll(b => b.map(x => x.textContent.trim())), ['Run', 'Edit', 'Show code', 'Delete']);
+  await ran.locator('[data-act=more]').click();
+  assert.deepEqual(await ran.locator('.menu [data-act]').evaluateAll(b => b.map(x => x.textContent.trim())), ['Run', 'Edit', 'Edit in Run AI', 'Show code', 'Delete']);
   await ran.locator('.menu [data-act=code]').click();
   await ran.locator('pre.code').waitFor();
   assert.equal(await ran.locator('.menu').count(), 0); // the menu closes after an action
   assert.equal(await page.locator('#suitebar').isVisible(), false);
-  // the choices ▶ and Run use are always in view, and open the bar without ticking anything
-  assert.match(await page.locator('#suiteSummary').textContent(), /Run once/);
-  await page.locator('#replayRepeat').evaluate(s => { s.value = '3'; s.dispatchEvent(new Event('change', { bubbles: true })); });
-  assert.match(await page.locator('#suiteSummary').textContent(), /Repeat 3×/);
-  await page.locator('#suiteSummary').click();
+  // Run options shows the choices ▶ and Run use, without ticking anything
+  await page.locator('#runOptions').click();
   await page.locator('#suitebar').waitFor();
-  await page.locator('#suiteSummary').click();
+  await page.locator('#runOptions').click();
   await page.locator('#suitebar').waitFor({ state: 'hidden' });
   await page.locator('#testList .item[data-name=fresh] input[type=checkbox]').check();
   await page.locator('#suitebar').waitFor();
@@ -124,7 +121,7 @@ test('Saved tests: ▶ for a new test, the row menu, View last result and the su
   await page.locator('#suiteClear').click();
   await page.locator('#suitebar').waitFor({ state: 'hidden' });
   assert.equal(await page.locator('#testList input[type=checkbox]:checked').count(), 0);
-  await ran.locator('[data-act=last]').click(); // View last result
+  await ran.locator('.row-link').click(); // View last result
   await page.locator('#result').waitFor();
   assert.deepEqual(errors, []);
   await page.close();
@@ -142,7 +139,7 @@ test('History: filter counts, kind · steps · who per row; Workflows: the block
   await page.locator('nav.views [data-view=workflows]').click();
   const wf = page.locator('#wfList .item').first();
   await wf.waitFor();
-  assert.match(await wf.textContent(), /AI Task\s*→\s*Loop\s*→\s*Validate/);
+  assert.match(await wf.textContent(), /AI task\s*→\s*Loop\s*→\s*Check/);
   assert.match(await wf.textContent(), /Never/);
   assert.match(await wf.locator('.title').textContent(), /W <b>quote's/); // as text, not markup
   assert.deepEqual(errors, []);
@@ -161,7 +158,7 @@ test('Settings: providers as cards with a badge and Configure; Appearance as car
   await page.locator('#tabLookBtn').click();
   assert.equal(await page.locator('.theme-opt[data-theme-pick=dark] .theme-prev').count(), 1);
   await page.locator('#openSetup').click();
-  await page.locator('#setupList .setup-item .pill').first().waitFor();
+  await page.locator('#setupList .req-row .pill').first().waitFor();
   await page.goto(`${app.base}/#/p/${P}`);
   await page.locator('nav.views [data-view=record]').click();
   await page.locator('#recForm.record-card').waitFor();
@@ -180,6 +177,23 @@ test('Narrow screen: a test row and a History row keep room for their name', asy
   await page.locator('#sideToggle').click();
   await page.locator('nav.views [data-view=history]').click();
   assert.ok(await w('#historyList button.item .title') > 120, 'run title has room');
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('Edit project from the project menu: a new default environment replaces the one remembered for replays', async () => {
+  const page = await open(`#/p/${P}`);
+  await page.evaluate(p => { const l = JSON.parse(localStorage.getItem('last')); localStorage.setItem('last', JSON.stringify({ ...l, projects: { ...l.projects, [p]: { replayEnv: 'e2e' } } })); }, P);
+  await page.reload(); await page.waitForFunction(() => window.__appStarted);
+  await page.locator('nav.views [data-view=tests]').click();
+  assert.equal(await page.inputValue('#replayEnv'), 'e2e');
+  assert.equal(await page.locator('#replayEnv option[value=""]').count(), 0); // no "None": an empty choice runs the default environment
+  await page.locator('#projSwitch').click();
+  await page.locator('#projMenu [data-edit]').click();
+  await page.locator('#projEnv').selectOption('local');
+  await page.locator('#projSave').click();
+  await page.locator('#projDlg').waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => document.getElementById('replayEnv').value === 'local');
   assert.deepEqual(errors, []);
   await page.close();
 });

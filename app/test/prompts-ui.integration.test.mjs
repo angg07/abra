@@ -6,6 +6,7 @@ import { chromium } from 'playwright-core';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { startApp } from './helpers/app-server.mjs';
+import { answerAsks, askLog } from './helpers/ask.mjs';
 
 const P = 'zz-prompts-ui', P2 = 'zz-prompts-ui-2';
 let app, browser;
@@ -16,7 +17,7 @@ test('save, reopen, update, delete and switch project on the Run AI page', async
   for (const p of [P, P2]) { mkdirSync(join(app.root, 'tests', p), { recursive: true }); writeFileSync(join(app.root, 'tests', p, 'project.json'), JSON.stringify({ name: p })); }
   browser = await chromium.launch();
   const page = await browser.newPage();
-  page.on('dialog', d => d.accept());
+  await answerAsks(page, 'ok');
   await page.addInitScript(() => localStorage.setItem('last', JSON.stringify({ setupSeen: true })));
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   const row = '#promptList [data-id=b1-polis-marine-hull]';

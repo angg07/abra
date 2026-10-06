@@ -30,9 +30,13 @@ function testFiles(): Record<string, string> {
   return Object.fromEntries(readdirSync(dir).map(f => [f, join(dir, f)]));
 }
 
+// test.info() throws outside a test: a constant at the top of the file (the app wraps every {{...}} string in fill())
+function currentTest() { try { return test.info(); } catch { return null; } }
+
 export function fill(text: string): string {
-  const info = test.info();
-  const key = `${info.testId}#${info.repeatEachIndex}`;
+  const info = currentTest();
+  if (!info && /\{\{\s*(data|file)\./.test(text)) throw new Error(`${text}: {{data.…}} and {{file.…}} work only inside test(), not at the top of the file`);
+  const key = info ? `${info.testId}#${info.repeatEachIndex}` : 'file'; // outside a test: one {{random}} per file load
   if (!perTest.has(key)) perTest.set(key, { random: String(Math.floor(100000 + Math.random() * 900000)) });
   return makeResolver({
     vars,

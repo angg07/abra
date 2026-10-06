@@ -38,3 +38,14 @@ test('upload', async ({ page }) => {
   assert.equal(bad.status, 'fail');
   assert.match(JSON.stringify(bad), /File \{\{file\.nope\.pdf\}\} not found: add it in Edit test › Files/);
 });
+
+test('a saved test may use {{...}} outside test(): a constant at the top of the file', async () => {
+  const dir = join(app.root, 'tests', P);
+  writeFileSync(join(dir, 'top.spec.ts'), `import { test, expect } from '@playwright/test';
+import { fill } from '../support/vars';
+const DAY = fill('{{today}}');
+test('top', async () => { expect(DAY).toMatch(/^\\d{4}-\\d{2}-\\d{2}$/); });
+`);
+  const r = await replay('top');
+  assert.equal(r.status, 'pass', JSON.stringify(r));
+});

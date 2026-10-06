@@ -2,7 +2,7 @@
   "name": "abra",
   "productName": "ABRA",
   "desktopName": "abra.desktop",
-  "version": "1.5.0",
+  "version": "1.8.0",
   "description": "Describe a task, an AI drives a real browser and writes a replayable Playwright test.",
   "author": "angg07 <20508936+angg07@users.noreply.github.com>",
   "license": "MIT",
@@ -27,6 +27,7 @@
     },
     "files": [
       "main.cjs",
+      "preload.cjs",
       "loading.html",
       "build/icon.png"
     ],

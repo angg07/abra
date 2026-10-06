@@ -5,6 +5,7 @@ import { chromium } from 'playwright-core';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { startApp } from './helpers/app-server.mjs';
+import { answerAsks, askLog } from './helpers/ask.mjs';
 
 let app, browser;
 // a computer that already went through the first-run screen (Requirements)
@@ -35,7 +36,7 @@ test('the first start on a computer shows Requirements; Continue goes on to Proj
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   await page.goto(app.base);
-  await page.locator('#view-setup .setup-item').first().waitFor({ timeout: 10000 });
+  await page.locator('#view-setup .req-row').first().waitFor({ timeout: 10000 });
   assert.match(await page.locator('#view-setup').textContent(), /Chromium/);
   if (await page.locator('#setupContinue').isEnabled()) { // this computer has everything required
     await page.locator('#setupContinue').click();
@@ -48,7 +49,7 @@ test('the first start on a computer shows Requirements; Continue goes on to Proj
 
 test('Import reads a project file and opens the imported project', async () => {
   const page = await openPage();
-  page.on('dialog', d => d.accept()); // the file list confirmation
+  await answerAsks(page, 'ok'); // the file list confirmation
   await page.goto(app.base);
   await page.locator('#projMore').click(); // Export all / Import live under ⋯
   await page.locator('#importProject').waitFor();
@@ -84,11 +85,10 @@ test('Settings: a change shows the save bar and marks its tab; Discard reverts; 
     assert.equal(await company.inputValue(), before);
 
     await company.fill('Changed Co');
-    const asked = page.waitForEvent('dialog', { timeout: 5000 }); // "Leave without saving?"
     await page.locator('#toProjects').click();
-    const dlg = await asked;
-    assert.match(dlg.message(), /unsaved changes in PDF guides/);
-    await dlg.dismiss(); // stay
+    await page.locator('#askDlg[open]').waitFor({ timeout: 5000 }); // "Leave Settings?"
+    assert.match(await page.locator('#askText').textContent(), /unsaved changes in PDF guides/);
+    await page.locator('#askDlg [data-ask=cancel]').click(); // stay
     assert.equal(await page.locator('#view-settings').isVisible(), true);
 
     await page.locator('#saveP').click();

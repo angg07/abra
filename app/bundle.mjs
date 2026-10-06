@@ -18,6 +18,7 @@ const ALLOWED = [
   { re: new RegExp(`^files/${SEG}/${SEG}$`), kind: 'base64' }, // a test's upload files (test-files.mjs)
   { re: new RegExp(`^prompts/${SEG}\\.json$`), kind: 'text' }, // a saved Run AI prompt (prompts.mjs)
   { re: new RegExp(`^prompt-files/${SEG}/${SEG}$`), kind: 'base64' }, // the files a saved prompt uploads
+  { re: new RegExp(`^sources/${SEG}\\.json$`), kind: 'text' }, // a saved test's Run AI source (test-sources.mjs)
 ];
 const kindOf = path => (path.includes('..') ? undefined : ALLOWED.find(a => a.re.test(path))?.kind);
 

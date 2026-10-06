@@ -23,3 +23,11 @@ export function pruneDir(folder, keep, ext) {
   for (const f of old) rmSync(join(folder, f), { force: true });
   return old;
 }
+
+// Deletes sub-folders older than maxAgeMs (e.g. Report a problem folders after 30 days)
+export function pruneOlder(folder, maxAgeMs, now = Date.now()) {
+  if (!existsSync(folder)) return [];
+  const old = readdirSync(folder, { withFileTypes: true }).filter(d => d.isDirectory() && now - statSync(join(folder, d.name)).mtimeMs > maxAgeMs).map(d => d.name);
+  for (const f of old) rmSync(join(folder, f), { recursive: true, force: true });
+  return old;
+}
