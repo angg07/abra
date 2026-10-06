@@ -17,7 +17,8 @@ test('Run AI from a saved prompt starts; stopping it right away ends it cleanly'
   const provider = (await (await app.req('/settings')).json()).providers.find(p => p.ready);
   if (!provider) return t.skip('no AI provider is ready on this computer');
   const { id: prompt } = await (await app.req(`/prompts?project=${P}`, { method: 'POST', body: JSON.stringify({ title: 'P', url: 'http://127.0.0.1:9/', task: 'Open the page' }) })).json();
-  const q = new URLSearchParams({ project: P, url: 'http://127.0.0.1:9/', task: 'Open the page', provider: provider.id, prompt });
+  const up = await (await app.req('/uploads?name=plan.md', { method: 'POST', body: '# Plan\nOpen it', headers: { 'content-type': 'application/octet-stream' } })).json();
+  const q = new URLSearchParams({ project: P, url: 'http://127.0.0.1:9/', task: 'Open the page', provider: provider.id, prompt, instr: JSON.stringify(up) });
   const res = await app.req(`/run?${q}`);
   let buf = '', events = [];
   for await (const c of res.body) {
@@ -32,4 +33,5 @@ test('Run AI from a saved prompt starts; stopping it right away ends it cleanly'
   const saved = JSON.parse(events.find(e => e[0] === 'saved')[1]);
   const entry = await (await app.req(`/history/${saved.id}`)).json();
   assert.equal(entry.prompt, prompt); // the saved prompt's id is kept on the run
+  assert.deepEqual(entry.instructions, { name: 'plan.md', text: '# Plan\nOpen it' }); // attached instructions too (Run again, Edit in Run AI)
 });

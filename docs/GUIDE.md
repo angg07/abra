@@ -138,6 +138,13 @@ update it (**New prompt** starts an empty one). Running a prompt keeps it. Saved
 `tests/<project>/prompts/` and `prompt-files/`, and travel with project export and import (an export that holds
 saved prompts needs ABRA 1.3.0 or newer to import).
 
+### Attached instructions
+Under **What should the AI do?**, **Attach instructions (.md)** adds a Markdown or text file (up to 100 KB) with
+detailed test instructions, for example a test plan you wrote or generated elsewhere. Its text goes to the AI together
+with the task, so the task itself can stay one line ("Test the order form, follow the attached plan"). The file is
+kept with a saved prompt, Edit in Run AI and Run again, and the run page names it. Changed the file? Attach it again
+(**Replace instructions**): ABRA keeps the text as it was when you attached it.
+
 ### Workflows
 
 **Workflows > New workflow** (or **Edit** on a row) opens Workflow Studio as a page: **Add a block** on the left

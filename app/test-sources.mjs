@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { projectDir, withPlaceholders } from './library.mjs';
+import { cleanInstructions } from './shared.mjs';
 
 const TEST = /^[a-z0-9][a-z0-9-]{0,59}$/;
 const fileOf = (project, test) => {
@@ -14,7 +15,7 @@ const fileOf = (project, test) => {
 const text = v => (typeof v === 'string' ? v : '');
 const clean = s => ({
   title: text(s?.title), url: text(s?.url), task: text(s?.task), expected: text(s?.expected), env: text(s?.env), session: text(s?.session),
-  provider: text(s?.provider), model: text(s?.model), record: s?.record === true, guide: s?.guide === true, flow: text(s?.flow), saved: text(s?.saved),
+  provider: text(s?.provider), model: text(s?.model), record: s?.record === true, guide: s?.guide === true, flow: text(s?.flow), ...(cleanInstructions(s?.instructions) && { instructions: cleanInstructions(s.instructions) }), saved: text(s?.saved),
 });
 
 export function readSource(project, test) {
@@ -32,7 +33,7 @@ export const deleteSource = (project, test) => rmSync(fileOf(project, test), { f
 // a History entry of an AI run; entry.guide is the PDF's file name, so the asked-for options are recordAsked/guideAsked
 export const sourceFromRun = run => clean({
   title: run.title, url: run.url, task: run.task, expected: run.expected, env: run.env, session: run.session,
-  provider: run.providerId, model: run.model, record: run.recordAsked === true, guide: run.guideAsked === true, flow: run.flow,
+  provider: run.providerId, model: run.model, record: run.recordAsked === true, guide: run.guideAsked === true, flow: run.flow, instructions: run.instructions,
 });
 // no run to go back to: the first goto() with a plain string, the test's name as title, no instructions
 export function sourceFromCode(code, test) {

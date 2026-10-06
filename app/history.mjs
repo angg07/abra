@@ -55,7 +55,7 @@ export function listRuns(projects) {
     ? db.prepare(`SELECT data FROM runs WHERE project IN (${list.map(() => '?').join(',')}) ORDER BY started DESC`).all(...list)
     : db.prepare('SELECT data FROM runs ORDER BY started DESC').all();
   return rows.map(({ data }) => {
-    const { steps, replaySteps, log, text, script, issues, original, ...r } = JSON.parse(data);
+    const { steps, replaySteps, log, text, script, issues, original, instructions, ...r } = JSON.parse(data); // the list stays light: /history/<id> has them
     return {
       ...r, hasScript: Boolean(script),
       stepCount: (steps?.length ?? 0) + (replaySteps ?? []).filter(s => !s.section).length, // section headings are not steps

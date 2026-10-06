@@ -25,7 +25,7 @@ import { dueSchedules, validSchedules, scheduleState, DAYS } from './scheduler.m
 import { notify, summary } from './notify.mjs';
 import { ciWorkflow } from './ci.mjs';
 import { recordFlow, stopRecording, isRecording, flowScript, flowStorage } from './recorder.mjs';
-import { splitAnswer, scriptFromCode, flakyOf, expectedVerdict, isAppError } from './shared.mjs';
+import { splitAnswer, scriptFromCode, flakyOf, expectedVerdict, isAppError, cleanInstructions } from './shared.mjs';
 import { checkRequirements, installBrowsers, OS_NAMES } from './setup.mjs';
 import { issueUrl, reportUrl, cleaner } from './issue.mjs';
 import { stamp as stampStep } from './steps.mjs';
@@ -477,9 +477,9 @@ async function runOnStage(res, { kind, record, guide, label, project, provider }
   }
 }
 
-function aiRun(res, { project, url, title, task, provider, model, record, guide, session, flow, env, expected, files = [], prompt, editTest }) {
+function aiRun(res, { project, url, title, task, attached, provider, model, record, guide, session, flow, env, expected, files = [], prompt, editTest }) {
   return withRun(res, { kind: 'ai', record, guide, label: provider.id, project, provider, locks: dbLock(project, env) }, async ({ send, signal, entry, rec, runDir, stage, startRecording, addGuideStep }) => {
-    Object.assign(entry, { url, title: title || undefined, task, prompt: prompt || undefined, provider: provider.label, providerId: provider.id, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, ...(files.length && { files }),
+    Object.assign(entry, { url, title: title || undefined, task, instructions: attached, prompt: prompt || undefined, provider: provider.label, providerId: provider.id, model: model || provider.model || '', session: session || undefined, flow: flow || undefined, env: env.name || undefined, expected: expected || undefined, ...(files.length && { files }),
       recordAsked: record, guideAsked: guide, editOf: editTest || undefined, steps: [] }); // the asked-for options (entry.guide becomes the PDF's name); editOf: Edit in Run AI
     markRunning(entry);
     await resetDatabase(project, env, line => send('text', line));
@@ -499,6 +499,7 @@ function aiRun(res, { project, url, title, task, provider, model, record, guide,
       files.length && `Files you can upload (use these exact values as the file paths, also in the test: setInputFiles('{{file.<name>}}')): ${files.map(f => `{{file.${f.name}}}`).join(', ')}`,
       flow && `The user recorded this flow with Playwright codegen. Use it as the route map: go through the same pages and use the same elements (the locators tell you which), so you do not need to explore. Adapt if something on screen differs, and verify the outcome yourself.\n\`\`\`ts\n${flowScript(flow)}\n\`\`\``,
       `Task:\n${task}`,
+      attached && `Detailed instructions for this task, from the attached file "${attached.name}" (follow them):\n${attached.text}`,
       expected && `Expected result (check it yourself on screen after the task):\n${expected}\n\nRight after the RESULT line, write exactly "EXPECTED: MET" or "EXPECTED: NOT MET", then what you actually saw. RESULT is SUCCESS only if the expected result is met. The test you write must assert this expected result.`,
     ].filter(Boolean).join('\n\n');
     const emit = (type, data) => {
@@ -1294,9 +1295,14 @@ async function route(req, res) {
       noProduction(makeResolver({ vars: env.vars }).fill(url));
       const flow = q('flow'); if (flow) flowScript(flow); // validates before streaming
       const files = pickUploads(uploadsDir, q('files'));
+      // attached instructions: an upload (instr), or the ones a past run had (instrRun: Run again from History)
+      const ins = q('instr') ? pickUploads(uploadsDir, `[${q('instr')}]`)[0] : null;
+      const instructions = ins ? cleanInstructions({ name: ins.name, text: readFileSync(join(uploadsDir, ins.id, ins.name), 'utf8') })
+        : q('instrRun') ? (r => (r?.project === project ? r.instructions : undefined))(getRun(q('instrRun'))) : undefined;
+      if (ins && !instructions) throw new Error('The attached instructions must be a text file of at most 100 KB');
       if (q('check') === '1') { res.writeHead(204); return res.end(); } // the form asks first: everything above passed
       sse(res);
-      return aiRun(res, { project, files, url, title: q('title').trim().slice(0, 100), task, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim(), prompt: promptExists(project, q('prompt')) ? q('prompt') : undefined, editTest: testExists(project, q('editTest')) ? q('editTest') : undefined });
+      return aiRun(res, { project, files, url, title: q('title').trim().slice(0, 100), task, attached: instructions, provider, model: q('model'), record, guide, session, flow, env, expected: q('expected').trim(), prompt: promptExists(project, q('prompt')) ? q('prompt') : undefined, editTest: testExists(project, q('editTest')) ? q('editTest') : undefined });
     }
     const names = q('tests').split(',').filter(Boolean);
     if (!names.length) throw new Error('Select at least one test');

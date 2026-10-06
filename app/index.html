@@ -128,6 +128,11 @@
               <textarea class="field" id="task" required rows="6" maxlength="10000" placeholder="Example: log in with {{appUser}} and {{APP_PASS}}, open Orders → New order, pick the first product, click Save."></textarea>
               <div class="task-tools" role="group" aria-label="Insert a value"><span class="lead">Insert</span><span class="var-chips" id="varChips"></span><span class="count" id="taskCount">0 / 10000</span></div>
             </div>
+            <div class="files-field instr-field">
+              <span class="hint" id="aiInstrHint">Optional: a .md file with detailed test instructions (up to 100 KB). The AI follows it together with the text above.</span>
+              <ul class="files-list" id="aiInstr"></ul>
+              <label class="btn ghost small add-files"><svg class="i" aria-hidden="true"><use href="#i-upload"/></svg><span id="aiInstrAddText">Attach instructions (.md)</span><input type="file" id="aiInstrIn" accept=".md,.markdown,.txt,text/markdown,text/plain" aria-describedby="aiInstrHint" class="visually-hidden"></label>
+            </div>
             <p class="err-msg" id="taskErr" hidden></p>
           </div>
           <div class="form-row">

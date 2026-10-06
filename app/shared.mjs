@@ -1,5 +1,9 @@
 // Shared by the UI (served at /shared.mjs) and the HTML report.
 
+// Run AI's attached instructions (a .md file the user wrote for the AI): { name, text }, else undefined
+export const MAX_INSTRUCTIONS = 100 * 1024;
+export const cleanInstructions = v => (typeof v?.name === 'string' && typeof v?.text === 'string' && v.name.length <= 200 && v.text.length <= MAX_INSTRUCTIONS ? { name: v.name, text: v.text } : undefined);
+
 export const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // Minimal, escaped markdown for AI text: paragraphs, bullet lists, **bold**, `code`

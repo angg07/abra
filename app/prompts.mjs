@@ -5,6 +5,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, rmSync
 import { join } from 'node:path';
 import { projectDir, slug } from './library.mjs';
 import { cleanFileName, filesIn, saveUpload } from './test-files.mjs';
+import { cleanInstructions } from './shared.mjs';
 
 const ID = /^[a-z0-9][a-z0-9-]{0,59}$/;
 const UPLOAD_ID = /^[0-9a-f]{16}$/;
@@ -22,12 +23,14 @@ export function validPrompt(b = {}) {
   };
   const task = text(b.task, 10_000, 'The instructions');
   if (!task.trim()) throw new Error('The instructions are required');
+  const instructions = cleanInstructions(b.instructions);
+  if (b.instructions && !instructions) throw new Error('The attached instructions must be a text file of at most 100 KB');
   const url = text(b.url, 2000, 'The URL').trim();
   if (url && !/^(https?:\/\/|\{\{)\S*$/.test(url)) throw new Error('The URL must start with http(s):// or {{');
   return {
     title: text(b.title, 100, 'The title').trim(), url, task, expected: text(b.expected, 2000, 'The expected result').trim(),
     env: text(b.env, 60, 'The environment'), provider: text(b.provider, 60, 'The AI'), model: text(b.model, 100, 'The model').trim(),
-    session: text(b.session, 100, 'The login session'), record: b.record === true, guide: b.guide === true, flow: text(b.flow, 100, 'The flow'),
+    session: text(b.session, 100, 'The login session'), record: b.record === true, guide: b.guide === true, flow: text(b.flow, 100, 'The flow'), instructions,
   };
 }
 
@@ -43,7 +46,7 @@ export function readPrompt(project, id) {
   return {
     title: text(raw?.title), url: text(raw?.url), task: text(raw?.task), expected: text(raw?.expected), env: text(raw?.env),
     provider: text(raw?.provider), model: text(raw?.model), session: text(raw?.session), record: raw?.record === true, guide: raw?.guide === true,
-    flow: text(raw?.flow), saved: text(raw?.saved), files: (Array.isArray(raw?.files) ? raw.files : []).filter(cleanName), id,
+    flow: text(raw?.flow), instructions: cleanInstructions(raw?.instructions), saved: text(raw?.saved), files: (Array.isArray(raw?.files) ? raw.files : []).filter(cleanName), id,
   };
 }
 export const promptExists = (project, id) => { try { return existsSync(fileOf(project, id)); } catch { return false; } };

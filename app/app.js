@@ -97,6 +97,7 @@ function urlOf(view, id) {
   if (view === 'report') return `#/report${id ? `/${encodeURIComponent(id)}` : ''}`;
   return location.hash || '#/';
 }
+let aiInstr = null; // Run AI's attached instructions: { name, text } of a .md file (server: instr)
 let routing = false; // route() is showing what the address says: show() replaces instead of adding an entry
 let shownView = 'home', shownId; // the page on screen, so a cancelled leave can put its address back
 const writeUrl = (url, replace) => { if (location.hash === url) return; history[replace || routing ? 'replaceState' : 'pushState'](null, '', url); };
@@ -334,6 +335,7 @@ async function enterProject() {
   document.title = `${project.name} · ABRA`;
   $('projName').textContent = project.name;
   const ps = projectState();
+  aiInstr = ps.instructions ?? null; showAiInstr();
   $('url').value = ps.url ?? project.url ?? ''; $('task').value = ps.task ?? ''; $('taskTitle').value = ps.title ?? ''; $('expected').value = ps.expected ?? '';
   $('recUrl').value = ps.recUrl ?? project.url ?? '';
   attachFlow(null);
@@ -1459,6 +1461,18 @@ function fixTest(runId, name) {
 
 /* ---------- AI form ---------- */
 let aiFiles = []; // [{ id, name, size }] uploaded for the next Run AI (server: app/data/uploads)
+// attached instructions (aiInstr, declared at the top: enterProject reads it): the text goes to the AI with the task
+function showAiInstr() {
+  $('aiInstr').innerHTML = aiInstr ? `<li><code>${esc(aiInstr.name)}</code><span class="muted">${fmtSize(new Blob([aiInstr.text]).size)}</span><button type="button" class="link danger" aria-label="Remove ${esc(aiInstr.name)}">Remove</button></li>` : '';
+  $('aiInstr').querySelector('button')?.addEventListener('click', () => { aiInstr = null; showAiInstr(); });
+  $('aiInstrAddText').textContent = aiInstr ? 'Replace instructions' : 'Attach instructions (.md)';
+}
+$('aiInstrIn').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  if (f.size > 100 * 1024) return toast(`${f.name} is larger than 100 KB`);
+  aiInstr = { name: f.name, text: await f.text() }; showAiInstr();
+};
 const showAiFiles = () => renderFiles($('aiFiles'), aiFiles, n => { aiFiles = aiFiles.filter(f => f.name !== n); showAiFiles(); });
 $('aiFileIn').onchange = async e => {
   try { for (const f of e.target.files) { const up = await sendFile(`/uploads?name=${encodeURIComponent(f.name)}`, f); aiFiles = [...aiFiles.filter(x => x.name !== up.name), { ...up, size: f.size }]; } }
@@ -1489,18 +1503,19 @@ $('f').onsubmit = async e => {
   const bad = aiFields().filter(([i, el, m]) => !fieldErr(i, el, m));
   showAiErrs(bad.map(([i, , m]) => [i, m]));
   if (bad.length) return $('aiErrs').focus();
-  const params = { url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value, record: $('record').checked ? '1' : '', guide: $('guide').checked ? '1' : '', flow: attachedFlow ?? '', env: $('aiEnv').value, expected: $('expected').value.trim(), files: aiFiles.length ? JSON.stringify(aiFiles.map(({ id, name }) => ({ id, name }))) : '', prompt: editingPrompt?.id ?? '', editTest: editingTest ?? '' };
+  const params = { url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value, record: $('record').checked ? '1' : '', guide: $('guide').checked ? '1' : '', flow: attachedFlow ?? '', env: $('aiEnv').value, expected: $('expected').value.trim(), files: aiFiles.length ? JSON.stringify(aiFiles.map(({ id, name }) => ({ id, name }))) : '', instr: '', prompt: editingPrompt?.id ?? '', editTest: editingTest ?? '' };
   store.set({ showBrowser: $('showBrowser').checked, provider: params.provider, model: params.model, record: $('record').checked, guide: $('guide').checked, aiSession: params.session });
-  storeProject({ url: params.url, title: params.title, task: params.task, expected: params.expected, aiEnv: params.env });
+  storeProject({ url: params.url, title: params.title, task: params.task, expected: params.expected, aiEnv: params.env, instructions: aiInstr });
   // ask the server first: a refused start (bad address, production, no AI) shows its reason here, not "Connection lost"
   const btn = $('runAiBtn'); btn.disabled = true; btn.querySelector('span:last-child').textContent = 'Starting browser…'; btn.insertAdjacentHTML('afterbegin', '<span class="spinner" aria-hidden="true"></span>');
   try {
+    if (aiInstr) { const up = await sendFile(`/uploads?name=${encodeURIComponent(aiInstr.name)}`, new Blob([aiInstr.text])); params.instr = JSON.stringify({ id: up.id, name: up.name }); } // too long for the address
     const r = await fetch(`/run?${new URLSearchParams({ ...params, project: project.id, check: '1' })}`);
     if (!r.ok) { showAiErrs([[$('url'), await r.text()]]); $('aiErrs').focus(); return; }
   } catch (err) { showAiErrs([[$('url'), err.message]]); return; }
   finally { runAiIdle(); }
   origin = 'ai';
-  runPage({ kind: 'ai', task: params.task, who: `${$('provider').selectedOptions[0]?.textContent ?? ''}${params.model ? ` (${params.model})` : ''}${params.session ? `, session ${params.session}` : ''}` }, !$('showBrowser').checked);
+  runPage({ kind: 'ai', task: params.task, who: `${$('provider').selectedOptions[0]?.textContent ?? ''}${params.model ? ` (${params.model})` : ''}${params.session ? `, session ${params.session}` : ''}${aiInstr ? `, instructions ${aiInstr.name}` : ''}` }, !$('showBrowser').checked);
   start('ai', params, { background: !$('showBrowser').checked });
 };
 $('task').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('f').requestSubmit(); });
@@ -1537,7 +1552,7 @@ $('testEditCancel').onclick = () => setEditingTest(null);
 const promptBody = () => JSON.stringify({
   url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, expected: $('expected').value.trim(),
   env: $('aiEnv').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value,
-  record: $('record').checked, guide: $('guide').checked, flow: attachedFlow ?? '', files: aiFiles.map(({ id, name }) => ({ id, name })),
+  record: $('record').checked, guide: $('guide').checked, flow: attachedFlow ?? '', instructions: aiInstr, files: aiFiles.map(({ id, name }) => ({ id, name })),
 });
 let promptStep = 0; // bumped by every save or open: a reply that arrives after the form moved on is ignored
 $('savePrompt').onclick = async () => {
@@ -1559,7 +1574,7 @@ $('savePrompt').onclick = async () => {
 $('promptNew').onclick = () => {
   setEditing(null);
   $('taskTitle').value = ''; $('task').value = ''; $('expected').value = '';
-  aiFiles = []; showAiFiles(); attachFlow(null); syncAiForm();
+  aiInstr = null; showAiInstr(); aiFiles = []; showAiFiles(); attachFlow(null); syncAiForm();
   $('task').focus();
 };
 async function loadPrompts() {
@@ -1589,6 +1604,7 @@ function fillAiForm(p, files) {
   if ($('provider').value === p.provider) $('model').value = p.model; // a model belongs to its AI: another AI keeps its own
   $('record').checked = p.record; $('guide').checked = p.guide;
   attachFlow(p.flow || null);
+  aiInstr = p.instructions ?? null; showAiInstr();
   aiFiles = files; showAiFiles();
   syncAiForm();
 }
@@ -1767,7 +1783,7 @@ function openPastRun(run, from = 'history') {
   origin = from;
   viewing = null; // runs in progress go on in the background (sidebar chips)
   $('rec').hidden = true; $('caption').hidden = true;
-  openRunPage({ id: run.id, kind: run.kind, title: run.title, task: run.task ?? '', who: `${when(run.started)}${run.provider ? `, ${run.provider}` : ''}${run.session ? `, session ${run.session}` : ''}` });
+  openRunPage({ id: run.id, kind: run.kind, title: run.title, task: run.task ?? '', who: `${when(run.started)}${run.provider ? `, ${run.provider}` : ''}${run.session ? `, session ${run.session}` : ''}${run.instructions ? `, instructions ${run.instructions.name}` : ''}` });
   setRunButtons('history');
   stageMode('past', run);
   // a run with a PDF guide: its last step's screenshot on the stage (the video is in the head's Video button)
@@ -1779,7 +1795,7 @@ function openPastRun(run, from = 'history') {
     : run.kind === 'fix'
     ? { kind: 'fix', params: { run: run.fixOf, test: run.testNames?.[0] ?? '', provider: settings.providers?.find(p => p.label === run.provider)?.id ?? '', model: run.model ?? '' } }
     : run.kind === 'ai'
-    ? { kind: 'ai', params: { url: run.url, title: run.title ?? '', task: run.task, provider: settings.providers?.find(p => p.label === run.provider)?.id ?? '', model: run.model ?? '', session: run.session ?? '', record: run.video ? '1' : '', guide: run.guide ? '1' : '', flow: run.flow ?? '', env: run.env ?? '', expected: run.expected ?? '' } }
+    ? { kind: 'ai', params: { url: run.url, title: run.title ?? '', task: run.task, provider: settings.providers?.find(p => p.label === run.provider)?.id ?? '', model: run.model ?? '', session: run.session ?? '', record: run.video ? '1' : '', guide: run.guide ? '1' : '', flow: run.flow ?? '', env: run.env ?? '', expected: run.expected ?? '', instrRun: run.instructions ? run.id : '' } }
     : { kind: 'replay', params: { tests: (run.testNames ?? []).join(','), session: run.session ?? '', record: run.video ? '1' : '', guide: run.guide ? '1' : '', env: run.env ?? '', repeat: String(run.times ?? 1) } };
   if (run.kind === 'workflow') for (const b of run.blocks ?? []) { // each block: its heading, the AI's steps, its result
     addPlainStep({ section: blockTitle(b) });
