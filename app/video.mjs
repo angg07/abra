@@ -2,12 +2,13 @@
 // in front, then the run with a caption bar at the bottom (step number + what is done) that changes as the
 // steps go, zoomed in on forms and modals, idle stretches sped up. Cuts only, no transitions.
 import { spawn } from 'node:child_process';
-import { renameSync, rmSync } from 'node:fs';
+import { renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import { chromium } from 'playwright-core';
 import { esc } from './shared.mjs';
 
-const ffmpeg = args => new Promise(resolve => {
-  const p = spawn(process.env.FFMPEG ?? 'ffmpeg', ['-loglevel', 'error', '-y', ...args], { stdio: ['ignore', 'ignore', 'pipe'] });
+const ffmpeg = (args, cwd) => new Promise(resolve => {
+  const p = spawn(process.env.FFMPEG ?? 'ffmpeg', ['-loglevel', 'error', '-y', ...args], { stdio: ['ignore', 'ignore', 'pipe'], cwd });
   let err = '';
   p.stderr.on('data', d => { err += d; });
   p.on('error', e => resolve(`cannot start ffmpeg: ${e.message}`));
@@ -141,7 +142,7 @@ export function captionText(text) {
 // concat with -c copy if long recordings make this wait noticeable.
 export async function finishVideo(video, { width, height, fps = 10, seconds = CARD_S, captions = [], ...card }) {
   const tmp = i => `${video}.${i}.png`, out = `${video}.tmp.mp4`;
-  const pngs = [tmp('card'), ...captions.map((_, i) => tmp(i)), tmp('speed')];
+  const pngs = [tmp('card'), ...captions.map((_, i) => tmp(i)), tmp('speed'), tmp('blank')], list = `${video}.captions.txt`, cmds = `${video}.zoom.txt`;
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width, height } });
@@ -156,40 +157,55 @@ export async function finishVideo(video, { width, height, fps = 10, seconds = CA
     const badge = Math.round(bh * 0.6);
     await page.setViewportSize({ width: badge * 2, height: badge });
     await page.setContent(speedHtml(SPEED), { waitUntil: 'load' });
-    await page.screenshot({ path: pngs.at(-1), omitBackground: true });
-    // [0] card, [1] recording, [2..] caption bars laid over the recording while their step lasts, [last] the speed badge
+    await page.screenshot({ path: pngs.at(-2), omitBackground: true });
+    // no caption yet: a clear bar (made by ffmpeg: Chromium sometimes refuses to screenshot an empty page)
+    const blankErr = await ffmpeg(['-f', 'lavfi', '-i', `color=c=black:s=${width}x${bh}`, '-vf', 'format=rgba,colorchannelmixer=aa=0', '-frames:v', '1', pngs.at(-1)]);
+    if (blankErr) return blankErr;
+    // every caption bar as one input (ffmpeg's concat list: each picture lasts until the next step), not one input
+    // per step: each input has its own decoder and buffers, ~25 MB each at 540p (60 steps took 2 GB)
+    const q = f => `'${f.replaceAll("'", "'\\''")}'`;
+    const bars = [{ file: pngs.at(-1), at: 0 }, ...captions.map((c, i) => ({ file: pngs[i + 1], at: c.at }))].filter((b, i, all) => i === all.length - 1 || all[i + 1].at > b.at);
+    writeFileSync(list, `ffconcat version 1.0\n${bars.map((b, i) => `file ${q(b.file)}\n${i < bars.length - 1 ? `duration ${(bars[i + 1].at - b.at).toFixed(3)}\n` : ''}`).join('')}`);
+    // [0] card, [1] recording, [2] the caption bars in time, [3] the speed badge.
+    // Everything streams frame by frame. A split whose branches were read at different times (trim/concat, a trimmed
+    // zoom copy) kept every frame in between in memory: a 3-minute 1080p recording took ~15 GB.
     let chain = '', last = '[1:v]';
-    // zoomed copies go under the captions; each copy only takes the frames of its own stretch and fades in and out
-    zoomStretches(captions, width, height).forEach(({ a, b, z }, i) => {
-      const f = Math.min(ZOOM_FADE_S, (b - a) / 3), [A, B] = [a.toFixed(2), b.toFixed(2)];
-      chain += `${last}split[zb${i}][zs${i}];[zs${i}]trim=start=${A}:end=${B},crop=${z.w}:${z.h}:${z.x}:${z.y},scale=${width}:${height},format=yuva420p,`
-        + `fade=t=in:st=${A}:d=${f.toFixed(2)}:alpha=1,fade=t=out:st=${(b - f).toFixed(2)}:d=${f.toFixed(2)}:alpha=1[zz${i}];`;
-      chain += `[zb${i}][zz${i}]overlay=0:0:eof_action=pass:enable='between(t,${A},${B})'[z${i}];`;
-      last = `[z${i}]`;
-    });
-    captions.forEach((c, i) => {
-      const until = captions[i + 1]?.at ?? 1e9;
-      chain += `${last}[${i + 2}:v]overlay=0:${height - bh - Math.round(height * BAR_LIFT)}:enable='between(t,${c.at.toFixed(2)},${until.toFixed(2)})'[v${i}];`;
-      last = `[v${i}]`;
-    });
-    // then cut into stretches at their own speed and put them back together
-    const segs = segments(captions), speedIn = `[${captions.length + 2}:v]`;
-    chain += `${last}split=${segs.length}${segs.map((_, i) => `[s${i}]`).join('')};`;
-    segs.forEach((g, i) => {
-      // one frame, shown for g.freeze seconds
-      if (g.freeze) { chain += `[s${i}]trim=start=${g.start.toFixed(2)},setpts=PTS-STARTPTS,trim=end_frame=1,tpad=stop_mode=clone:stop_duration=${(g.freeze - 1 / fps).toFixed(3)}[p${i}];`; return; }
-      chain += `[s${i}]trim=start=${g.start.toFixed(2)}${g.end === undefined ? '' : `:end=${g.end.toFixed(2)}`},setpts=(PTS-STARTPTS)${g.fast ? `/${SPEED}` : ''}`;
-      chain += g.fast ? `[t${i}];[t${i}]${speedIn}overlay=${width - badge * 2 - 24}:24[p${i}];` : `[p${i}];`;
-    });
-    chain += `${segs.map((_, i) => `[p${i}]`).join('')}concat=n=${segs.length}:v=1:a=0,fps=${fps},scale=out_range=tv,format=yuv420p[r];`;
-    const err = await ffmpeg(['-loop', '1', '-framerate', String(fps), '-t', String(seconds), '-i', pngs[0], '-i', video, ...pngs.slice(1).flatMap(f => ['-i', f]),
+    const stretches = zoomStretches(captions, width, height);
+    // zoom: one copy of the picture, cropped to the current stretch's box and scaled back up, mixed over the recording
+    // by blend (opacity 1 = the recording, 0 = the zoomed copy). sendcmd moves the box and fades the mix at each
+    // stretch's times; both copies go frame by frame, however many stretches there are.
+    if (stretches.length) {
+      const t = v => v.toFixed(3), lines = [];
+      for (const { a, b, z } of stretches) {
+        const f = Math.min(ZOOM_FADE_S, (b - a) / 3), k = Math.max(1, Math.round(f * fps)), at = i => a + i * f / k;
+        lines.push(`${t(a)}-${t(b)} [enter] crop@z w ${z.w}, [enter] crop@z h ${z.h}, [enter] crop@z x ${z.x}, [enter] crop@z y ${z.y};`);
+        for (let i = 0; i < k; i++) lines.push(`${t(at(i))}-${t(i === k - 1 ? b - f : at(i + 1))} [enter] blend@z all_opacity ${t(1 - (i + 1) / k)};`); // in; the last step lasts
+        for (let i = 0; i < k; i++) lines.push(`${t(b - f + i * f / k)}-${t(b - f + (i + 1) * f / k)} [enter] blend@z all_opacity ${t((i + 1) / k)};`); // out
+        lines.push(`${t(b)}-${t(b + 1)} [enter] crop@z w ${width}, [enter] crop@z h ${height}, [enter] crop@z x 0, [enter] crop@z y 0;`); // the whole picture: scale passes it through
+      }
+      writeFileSync(cmds, lines.join('\n') + '\n');
+      const on = stretches.map(({ a, b }) => `between(t,${t(a)},${t(b)})`).join('+');
+      chain += `[1:v]sendcmd=f=${basename(cmds)},split=2[zm][zs];[zs]crop@z=${width}:${height}:0:0,scale=${width}:${height}[zz];`
+        + `[zm][zz]blend@z=all_mode=normal:all_opacity=1:enable='${on}'[zb];`;
+      last = '[zb]';
+    }
+    chain += `${last}[2:v]overlay=0:${height - bh - Math.round(height * BAR_LIFT)}[v];`; last = '[v]'; // the last bar stays to the end
+    // then the stretches at their own speed, in one pass: each frame moves to its time in the finished video
+    // (videoTime without the card); fps drops the extra frames of sped-up stretches and repeats the frame before a hold
+    const segs = segments(captions), n = v => v.toFixed(3);
+    const remap = segs.map(g => g.freeze ? `gt(T,${n(g.start)})*${g.freeze}`
+      : g.end === undefined ? `(max(T,${n(g.start)})-${n(g.start)})` : `(clip(T,${n(g.start)},${n(g.end)})-${n(g.start)})${g.fast ? `/${SPEED}` : ''}`).join('+');
+    const fast = segs.filter(g => g.fast).map(g => `between(t,${n(videoTime(segs, g.start, 0))},${n(videoTime(segs, g.end, 0))})`).join('+') || '0';
+    chain += `${last}setpts='(${remap})/TB',fps=${fps}[t];[t][3:v]overlay=${width - badge * 2 - 24}:24:enable='${fast}',scale=out_range=tv,format=yuv420p[r];`;
+    const err = await ffmpeg(['-loop', '1', '-framerate', String(fps), '-t', String(seconds), '-i', pngs[0], '-i', video, '-f', 'concat', '-safe', '0', '-i', list, '-i', pngs.at(-2),
       '-filter_complex', `[0:v]scale=out_range=tv,format=yuv420p[c];${chain}[c][r]concat=n=2:v=1:a=0[v]`, '-map', '[v]',
-      '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-bsf:v', 'h264_metadata=video_full_range_flag=0', '-movflags', '+faststart', out]); // limited range: see stage.mjs
+      '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-bsf:v', 'h264_metadata=video_full_range_flag=0', '-movflags', '+faststart', out], dirname(video)); // limited range: see stage.mjs. In the recording's folder: sendcmd names its file
+      // by base name (the app's own run names: letters, digits, dashes), nothing to escape in the filter
     if (err) return err;
     renameSync(out, video);
     return null;
   } catch (e) { return e.message; } finally {
     await browser.close();
-    for (const f of [...pngs, out]) rmSync(f, { force: true });
+    for (const f of [...pngs, list, cmds, out]) rmSync(f, { force: true });
   }
 }

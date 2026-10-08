@@ -225,6 +225,10 @@ code, .hint code, .evidence code, .note code { font:12px var(--mono); background
 .sum-row > span { flex:1; min-width:0; display:grid; }
 .sum-row small { font-size:var(--fs-12); color:var(--muted); }
 .sum-row b { font-weight:600; font-size:var(--fs-13); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Output: its three choices in view, one click each (not behind Change settings) */
+.out-row { align-items:flex-start; }
+.out-row .i { margin-top:2px; }
+.out-row .check { min-height:30px; font-size:var(--fs-13); font-weight:600; }
 .flowchip { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:9px 12px; border-radius:var(--r-sm); background:var(--accent-soft); font-size:14px; margin:0; }
 
 /* ---------- lists ---------- */

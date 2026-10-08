@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { finishVideo, titleCardHtml, captionHtml, segments, zoomRect, captionText, zoomStretches, videoTime } from '../video.mjs';
@@ -147,5 +147,36 @@ test('two holds: the finished video is as long as videoTime says (run page jumps
     // the recording's end (4 s) → card 3 + 4 + two holds of 1.5
     assert.equal(videoTime(segments(captions), 4), 10);
     assert.ok(Math.abs(seconds(video) - 10) < 0.15, `duration ${seconds(video)}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ponytail: Linux only (/usr/bin/time); the graph must stream, so a longer recording must not need more memory
+test('finishing a recording takes the same memory for 20 s and 60 s (zooms, holds and sped-up stretches stream)', { skip: !existsSync('/usr/bin/time') && 'needs /usr/bin/time' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abr-video-'));
+  const peak = async secs => {
+    const video = join(dir, `run${secs}.mp4`), log = join(dir, `rss${secs}`), wrap = join(dir, 'ffmpeg');
+    writeFileSync(wrap, `#!/bin/sh\nexec /usr/bin/time -f %M -a -o ${log} ffmpeg "$@"\n`); chmodSync(wrap, 0o755);
+    execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=30', '-t', String(secs), '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', video]);
+    const captions = [];
+    for (let at = 1, n = 1; at < secs; at += 4, n++) captions.push({ n, at, text: `Step ${n}`, hold: n % 2 === 0, zoom: n % 3 === 0 ? { x: 40, y: 40, w: 160, h: 40, vw: 640, vh: 360 } : undefined });
+    process.env.FFMPEG = wrap;
+    try { assert.equal(await finishVideo(video, { width: 640, height: 360, fps: 30, title: 't', captions }), null); } finally { delete process.env.FFMPEG; }
+    return Math.max(...readFileSync(log, 'utf8').trim().split('\n').map(Number));
+  };
+  try {
+    const [short, long] = [await peak(20), await peak(60)];
+    assert.ok(long < short * 1.5, `peak ${short} KB for 20 s, ${long} KB for 60 s`); // buffering grew ~3x
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('before the first step the caption bar is clear: the recording shows through', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'abr-video-'));
+  const video = join(dir, 'run.mp4');
+  try {
+    execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=320x200:r=10', '-t', '3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', video]);
+    assert.equal(await finishVideo(video, { width: 320, height: 200, fps: 10, title: 't', captions: [{ n: 1, at: 1.5, text: 'Click' }] }), null);
+    // 0.5 s into the recording (after the 3 s card), in the middle of the bar's place
+    const px = execFileSync('ffmpeg', ['-loglevel', 'error', '-ss', '3.5', '-i', video, '-frames:v', '1', '-vf', 'format=rgb24,crop=2:2:160:170', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+    assert.ok(px[2] > 150 && px[0] < 80, `bar place is rgb(${[...px]})`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

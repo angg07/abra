@@ -72,11 +72,11 @@ test('Run AI: a variable chip inserts at the cursor, the counter counts, the sum
   assert.equal(await page.evaluate(() => document.activeElement.id), 'task');
   assert.equal(await page.locator('#taskCount').textContent(), '21 / 10000');
   assert.equal(await page.locator('#filesMore').getAttribute('open'), null); // no title or files: folded
-  await page.locator('#rsMore summary').click();
+  // Output's three choices are in view, without opening Change settings
+  assert.equal(await page.locator('#rsMore').getAttribute('open'), null);
   await page.locator('#guide').check();
   await page.locator('#showBrowser').uncheck();
-  assert.match(await page.locator('#sumOut').textContent(), /PDF guide/);
-  assert.doesNotMatch(await page.locator('#sumOut').textContent(), /Visible browser/);
+  assert.equal(await page.isChecked('#guide'), true); assert.equal(await page.isChecked('#showBrowser'), false);
   // a saved prompt fills the form by code: the summary follows it too
   const providers = (await (await app.req('/settings')).json()).providers.filter(p => p.ready);
   const current = await page.inputValue('#provider'), other = providers.find(p => p.id !== current);
@@ -85,7 +85,7 @@ test('Run AI: a variable chip inserts at the cursor, the counter counts, the sum
   await page.locator('nav.views [data-view=ai]').click();
   await page.locator('#promptList [data-id=no-pdf] [data-act=open]').click();
   await page.locator('#promptEditingName', { hasText: 'No PDF' }).waitFor();
-  assert.doesNotMatch(await page.locator('#sumOut').textContent(), /PDF guide/);
+  assert.equal(await page.isChecked('#guide'), false); // the prompt's own choice
   assert.equal(await page.locator('#sumAi').textContent(), `${other.label} · ${other.model || 'default'}`); // the prompt's AI with its own default model
   assert.equal(await page.locator('#taskCount').textContent(), '5 / 10000');
   assert.equal(await page.locator('#filesMore').getAttribute('open'), ''); // it has a title: unfolded

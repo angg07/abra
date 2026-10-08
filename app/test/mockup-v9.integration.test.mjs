@@ -68,7 +68,7 @@ test('Projects, Run AI and Record follow the mockup', async () => {
   const page = await open('');
   const card = page.locator('.project[data-id=zz-v9]');
   await card.waitFor();
-  assert.equal(await card.locator('[data-edit]').count(), 0); // edit lives in the project menu
+  assert.equal(await card.locator('[data-edit]').count(), 1); // Edit project from the card too (also in the project menu)
   assert.match(await card.textContent(), /Pass rate · \d+ runs/);
   assert.ok(await card.locator('.proj-foot').evaluate(e => e.getBoundingClientRect().height < 52), 'one-line footer');
   assert.ok(await card.locator('.proj-url').evaluate(e => e.scrollWidth <= e.clientWidth), 'URL not cut');
@@ -139,7 +139,7 @@ test('Run result: flat head with kind pill and title; actions in the head; ⋯ o
   assert.ok(await page.locator('#logWrap').isVisible()); // the log is always there
   assert.equal(await page.locator('.result-actions').count(), 0); // the old grid is gone
   await page.locator('#runMore').click();
-  assert.deepEqual(await page.locator('#runMoreMenu [data-act]').evaluateAll(b => b.map(x => x.dataset.act)), ['report', 'copy', 'show', 'problem']);
+  assert.deepEqual(await page.locator('#runMoreMenu [data-act]').evaluateAll(b => b.map(x => x.dataset.act)), ['ai', 'report', 'copy', 'show', 'problem']);
   await page.locator('#runMoreMenu [data-act=show]').click();
   assert.ok(await page.locator('#scriptPre').isVisible());
   await page.locator('#back').click();
@@ -268,10 +268,22 @@ test('Report: validation, live preview, a run picked from its ⋯ menu, sent scr
   // a run's ⋯ → Report a problem with this run: the run is picked
   await page.locator('nav.views [data-view=history]').click();
   await page.locator('#historyList button.item', { hasText: 'AI with video' }).click();
+  // the ⋯ menu is never cut off by the side panel (it scrolls, so it used to clip a menu that opened past its edge)
+  const unclipped = () => page.locator('#runMoreMenu').evaluate(m => { const r = m.getBoundingClientRect(); return [[r.left + 12, r.top + 12], [r.right - 12, r.bottom - 12]].every(([x, y]) => m.contains(document.elementFromPoint(x, y))); });
+  // as on a screen whose fonts are a bit wider: the actions wrap and ⋯ starts the second line, at the panel's left edge
+  await page.addStyleTag({ content: '#runActs { max-width: 300px; flex-wrap: wrap; }' });
+  for (const size of [{ width: 1920, height: 1000 }, { width: 1440, height: 420 }]) {
+    await page.setViewportSize(size);
+    await page.locator('#runMore').click();
+    await page.locator('#runMoreMenu').waitFor();
+    assert.ok(await unclipped(), `menu cut off at ${size.width}×${size.height}`);
+    await page.keyboard.press('Escape'); if (await page.locator('#runMoreMenu').isVisible()) await page.locator('#runMore').click();
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.locator('#runMore').click();
   await page.locator('#runMoreMenu [data-act=problem]').click();
   await page.locator('#view-report').waitFor();
-  assert.equal(await page.locator('#repRun').inputValue(), 'v9-ai');
+  await page.waitForFunction(() => document.getElementById('repRun').value === 'v9-ai'); // the page shows first, the run list loads after
   assert.deepEqual(errors, []);
   await page.close();
 });
@@ -281,6 +293,12 @@ test('steps: replay steps marked from test results; a click jumps the video or s
   await page.locator('#historyList button.item', { hasText: 'Suite marks' }).click();
   await page.locator('#result').waitFor();
   assert.equal(await page.locator('#steps .step.pass').count(), 2); // the passing test's steps
+  // a result that did not pass: Copy puts it in plain text on the clipboard
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.locator('#result [data-act=copy-result]').click();
+  await page.locator('#toast', { hasText: 'Result copied' }).waitFor();
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  assert.match(copied, /^Failed: Suite marks/); assert.match(copied, /Failed test: bad\nx/); assert.match(copied, /Run: v9-marks$/);
   assert.equal(await page.locator('#steps .step.fail').count(), 1); // the failing test's last step
   await page.locator('#back').click();
   await page.locator('#historyList button.item', { hasText: 'Head marks' }).click();
@@ -306,6 +324,8 @@ test('steps: replay steps marked from test results; a click jumps the video or s
   }
   await page.locator('#back').click();
   await page.locator('#historyList button.item', { hasText: 'With guide' }).click();
+  await page.locator('#result').waitFor();
+  assert.equal(await page.locator('#result [data-act=copy-result]').count(), 0); // a passed run: nothing to report
   await page.locator('#stageShot').waitFor(); // the last step's screenshot, with a caption
   assert.match(await page.locator('#stageShot').getAttribute('src'), /002\.jpg$/);
   assert.match(await page.locator('#caption').textContent(), /Step 2/);
@@ -368,6 +388,15 @@ test('New project: three fields, errors under each, stays on Projects with a toa
   assert.equal(await page.locator('#home').isVisible(), true);
   await page.locator('.project[data-id=zz-v9-new]').waitFor();
   assert.ok(await page.locator('.project[data-id=zz-v9-new]').isVisible());
+  // the card's edit button: Edit project without opening the project; saving stays on Projects
+  await page.locator('.project[data-id=zz-v9-new] [data-edit]').click();
+  await page.locator('#projDlg').waitFor();
+  assert.equal(await page.locator('#projTitle').textContent(), 'Edit zz-v9-new');
+  await page.fill('#projUrl', 'http://edited.test');
+  await page.locator('#projSave').click();
+  await page.locator('#projDlg').waitFor({ state: 'hidden' });
+  await page.locator('.project[data-id=zz-v9-new] .proj-url', { hasText: 'http://edited.test' }).waitFor();
+  assert.equal(await page.locator('#home').isVisible(), true);
   await page.goto(`${app.base}/#/p/zz-v9-new/ai`); await page.waitForFunction(() => window.__appStarted);
   await page.locator('#projSwitch').click();
   await page.locator('#projMenu [data-edit]').click();
@@ -424,5 +453,21 @@ test('details: empty searches, Failed count, toasts, Settings tab keys, the phon
   const ran = page.locator('#testList .item[data-name=ran]');
   assert.equal(await ran.locator('.pill').isVisible(), false); // as the mockup: no pill wrapping under the row on phones
   assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test('History: an AI run\'s ⋯ › Edit in Run AI fills the Run AI form with its prompt', async () => {
+  const page = await open(`#/p/${P}/history`);
+  await page.locator('#historyList button.item', { hasText: 'AI with video' }).click();
+  await page.locator('#result').waitFor();
+  await page.locator('#runMore').click();
+  await page.locator('#runMoreMenu [data-act=ai]').click();
+  await page.locator('#view-ai').waitFor();
+  assert.equal(await page.inputValue('#task'), 'Log in and check the title');
+  assert.equal(await page.inputValue('#taskTitle'), 'AI with video');
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'task');
+  assert.equal(await page.locator('#testEditing').isVisible(), false); // a new run, not an update of a test
+  await page.goBack(); // the run page again
+  await page.locator('#view-run').waitFor();
   await page.close();
 });

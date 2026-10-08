@@ -160,7 +160,11 @@
           <div class="run-summary">
             <div class="sum-row"><svg class="i" aria-hidden="true"><use href="#i-cpu"/></svg><span><small>AI</small><b id="sumAi"></b></span></div>
             <div class="sum-row"><svg class="i" aria-hidden="true"><use href="#i-layers"/></svg><span><small>Environment</small><b id="sumEnv"></b></span></div>
-            <div class="sum-row"><svg class="i" aria-hidden="true"><use href="#i-video"/></svg><span><small>Output</small><b id="sumOut"></b></span></div>
+            <div class="sum-row out-row" role="group" aria-labelledby="outLbl"><svg class="i" aria-hidden="true"><use href="#i-video"/></svg><span><small id="outLbl">Output</small>
+              <label class="check"><input type="checkbox" id="record" checked> Record video</label>
+              <label class="check"><input type="checkbox" id="guide"> Make a PDF guide</label>
+              <label class="check"><input type="checkbox" id="showBrowser" checked> Show the browser</label>
+            </span></div>
           </div>
           <details class="disclose" id="rsMore">
             <summary><span class="disclose-text"><span class="lbl">Change settings</span></span><svg class="i chev" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
@@ -169,11 +173,6 @@
               <label>Model <input class="field" id="model" placeholder="default"></label>
               <label>Start with a login session <select class="field sessionSel" id="aiSession"></select></label>
               <label>Environment <select class="field envSel" id="aiEnv"></select></label>
-              <div>
-                <label class="check"><input type="checkbox" id="record" checked> Record video</label>
-                <label class="check"><input type="checkbox" id="guide"> Make a PDF guide</label>
-                <label class="check"><input type="checkbox" id="showBrowser" checked> Show the browser</label>
-              </div>
             </div>
           </details>
           <button type="submit" class="btn wide" id="runAiBtn"><svg class="i" aria-hidden="true"><use href="#i-play"/></svg><span>Run AI</span></button>

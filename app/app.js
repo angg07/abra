@@ -217,6 +217,7 @@ function renderHome() {
         <span class="proj-ava" aria-hidden="true">${esc(p.name.slice(0, 2).toUpperCase())}</span>
         <span class="proj-id"><span class="proj-name">${esc(p.name)}</span><span class="proj-url">${esc(p.url || p.description || 'No start URL')}</span></span>
         ${statusPill(p.last?.status)}
+        <button type="button" class="icon-btn" data-edit="${esc(p.id)}" aria-label="Edit ${esc(p.name)}" title="Edit project">${icon('edit')}</button>
       </div>
       <div class="meter">
         <div class="meter-top"><span>Pass rate · ${plural(n, 'run')}</span><b>${rate === null ? '—' : `${rate}%`}</b></div>
@@ -958,7 +959,6 @@ function syncRunSummary() {
   const prov = $('provider').selectedOptions[0]?.textContent ?? 'No AI', model = $('model').value.trim() || $('model').placeholder;
   $('sumAi').textContent = `${prov} · ${model}`;
   $('sumEnv').textContent = $('aiEnv').value || 'None';
-  $('sumOut').textContent = [$('record').checked && 'Video', $('guide').checked && 'PDF guide', $('showBrowser').checked && 'Visible browser'].filter(Boolean).join(', ') || 'In the background, no video';
 }
 $('f').addEventListener('input', syncRunSummary); $('f').addEventListener('change', syncRunSummary);
 // after the form is filled by code (a project, a saved prompt, New prompt): counter, summary, and Title and files open when they hold something
@@ -1308,7 +1308,10 @@ function renderResult(run, { live = false } = {}) {
   r.className = 'result ' + status;
   const failedAt = status === 'fail' && run.kind === 'ai' && run.steps?.length && run.expectedMet !== false ? `Failed at step ${run.steps.length}` : '';
   const bigIcon = status === 'pass' ? 'check' : status === 'stopped' ? 'stop' : ['interrupted', 'blocked'].includes(status) ? 'alert' : 'x';
-  r.innerHTML = `<div class="result-top"><span class="big">${icon(bigIcon)}</span><span class="result-text"><b>${esc(failedAt || title.replace(/^[✓✗⛔] /, ''))}</b><small>${esc(sub)}${run.started ? ` · ${esc(when(run.started))}` : ''}</small></span></div>`;
+  const headline = failedAt || title.replace(/^[✓✗⛔] /, ''), meta = `${sub}${run.started ? ` · ${when(run.started)}` : ''}`;
+  r.innerHTML = `<div class="result-top"><span class="big">${icon(bigIcon)}</span><span class="result-text"><b>${esc(headline)}</b><small>${esc(meta)}</small></span>${status !== 'pass' ? `<button type="button" class="icon-btn" data-act="copy-result" aria-label="Copy this result" title="Copy this result">${icon('copy')}</button>` : ''}</div>`;
+  // Copy: the result as plain text, to paste into a chat or a ticket
+  r.querySelector('[data-act=copy-result]')?.addEventListener('click', () => navigator.clipboard.writeText(resultText(run, headline, meta)).then(() => toast('Result copied'), () => toast('Could not copy: select the text instead')));
   if (run.error) r.insertAdjacentHTML('beforeend', `<p class="evidence">${esc(run.error)}</p>`);
   if (run.flaky?.length) r.insertAdjacentHTML('beforeend', `<div class="flakybox"><b>⚠ Flaky: passes sometimes, fails sometimes.</b> Usually timing (slow loading, animations), not a real break. Fix the wait before using Fix with AI.<ul>${run.flaky.map(f => `<li>${esc(f.title)}${f.row ? ` (row ${f.row})` : ''}: passed ${f.passed} of ${f.total}</li>`).join('')}</ul></div>`);
   if (run.expected) r.insertAdjacentHTML('beforeend', `<div class="expectbox ${run.expectedMet === true ? 'met' : 'unmet'}"><b>${run.expectedMet === true ? '✓ Expected result met' : run.expectedMet === false ? '✗ Expected result not met' : '? The AI did not confirm the expected result'}</b><span>${esc(run.expected)}</span></div>`);
@@ -1371,6 +1374,7 @@ function renderResult(run, { live = false } = {}) {
   }
   if (run.video) { $('videoBtn').href = `/recordings/${encodeURIComponent(run.video)}`; $('videoBtn').hidden = false; }
   const items = [];
+  if (run.kind === 'ai' && run.task) items.push(['ai', 'Edit in Run AI', 'sparkles', () => editRunInAi(run)]);
   if (run.guide) items.push(['pdf', 'Open PDF guide', 'file', () => window.open(`/guides/${encodeURIComponent(run.guide)}`, '_blank', 'noopener')]);
   if (run.guide && run.guideDoc) items.push(['pdfEdit', 'Edit PDF guide', 'edit', () => openGuideEditor(run.guide)]);
   items.push(['report', 'Download HTML report', 'download', () => { location.href = `/report/${encodeURIComponent(run.id)}`; }]);
@@ -1408,6 +1412,19 @@ function renderResult(run, { live = false } = {}) {
   renderIssues(run.issues ?? []);
   r.hidden = false;
   if (live) r.scrollIntoView({ block: 'nearest' }); // a run opened from History starts at its head
+}
+function resultText(run, head, meta) {
+  const last = run.steps?.at(-1), step = last && describe(last);
+  const failing = (run.tests ?? []).filter(t => t.status !== 'passed' && t.status !== 'skipped');
+  return [
+    `${head}: ${run.title || (run.task ?? '').split('\n')[0]}`, meta,
+    run.error && `Error: ${run.error}`,
+    run.expected && `${run.expectedMet === true ? 'Expected result met' : run.expectedMet === false ? 'Expected result not met' : 'Expected result not confirmed'}: ${run.expected}`,
+    step && `Last step (${run.steps.length}): ${step.what}${step.detail ? ` · ${step.detail}` : ''}`,
+    ...failing.map(t => `Failed test: ${t.title}${t.row ? ` (row ${t.row})` : ''}${t.error ? `\n${t.error}` : ''}`),
+    run.evidence && `What the AI saw:\n${run.evidence}`,
+    `Run: ${run.id}`,
+  ].filter(Boolean).join('\n\n');
 }
 // the run head's ⋯ menu: built from the finished run (renderResult), so it never lists what the run lacks
 let runMenuItems = [];
@@ -1549,6 +1566,17 @@ async function editInAi(name) {
   } catch (err) { toast(err.message); }
 }
 $('testEditCancel').onclick = () => setEditingTest(null);
+// History › an AI run's ⋯ › Edit in Run AI: the form takes that run's prompt, to change and run as a new run.
+// Its uploads come along while they are kept (a day); an older one is asked for again when Run AI checks.
+function editRunInAi(run) {
+  promptStep++; // a saved prompt or test still opening does not overwrite this
+  setEditing(null); setEditingTest(null);
+  fillAiForm({ url: run.url ?? '', title: run.title ?? '', task: run.task, expected: run.expected ?? '', provider: run.providerId ?? '', model: run.model ?? '',
+    env: run.env ?? '', session: run.session ?? '', record: run.recordAsked ?? Boolean(run.video), guide: run.guideAsked ?? Boolean(run.guide), flow: run.flow, instructions: run.instructions }, run.files ?? []);
+  show('ai');
+  $('scroll').scrollTop = 0; $('task').focus();
+  toast('The prompt of this run: change it, then Run AI');
+}
 const promptBody = () => JSON.stringify({
   url: $('url').value, title: $('taskTitle').value.trim(), task: $('task').value, expected: $('expected').value.trim(),
   env: $('aiEnv').value, provider: $('provider').value, model: $('model').value.trim(), session: $('aiSession').value,
@@ -1654,6 +1682,27 @@ async function loadTests() {
   syncSuitebar();
 }
 const selectedTests = () => [...document.querySelectorAll('#testList .item')].filter(i => i.querySelector('input')?.checked).map(i => i.dataset.name);
+// An open menu is placed in the window next to its button (position: fixed), so a scrolling panel (the run page's
+// side panel, a list) never cuts it off; it opens above the button or moves sideways when there is no room.
+function placeMenu(m) {
+  const btn = m.parentElement?.querySelector('[aria-haspopup=menu], [data-act=more]');
+  if (!btn || m.hidden) return;
+  const r = btn.getBoundingClientRect(), pad = 8, gap = 6, right = m.classList.contains('right');
+  const { clientWidth: W, clientHeight: H } = document.documentElement; // the window without its scrollbar
+  Object.assign(m.style, { position: 'fixed', zIndex: 45, left: '0px', top: '0px', right: 'auto', maxHeight: `${H - 2 * pad}px`, overflowY: 'auto', ...(!right && { width: `${Math.max(r.width, 200)}px` }) });
+  const w = m.offsetWidth, h = m.offsetHeight;
+  const below = r.bottom + gap, above = r.top - gap - h;
+  const x = Math.min(Math.max(pad, right ? r.right - w : r.left), W - w - pad), y = below + h <= H - pad || above < pad ? Math.max(pad, Math.min(below, H - h - pad)) : above;
+  // fixed is measured from an ancestor with a backdrop-filter (the sticky page head), not the window: take its offset off
+  const o = m.getBoundingClientRect(); // where left 0 / top 0 landed
+  m.style.left = `${x - o.left}px`; m.style.top = `${y - o.top}px`;
+}
+const placeOpenMenus = () => document.querySelectorAll('.menu:not([hidden])').forEach(placeMenu);
+new MutationObserver(recs => {
+  for (const r of recs) for (const m of r.type === 'attributes' ? [r.target] : r.addedNodes) if (m.classList?.contains('menu')) placeMenu(m);
+}).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['hidden'] });
+addEventListener('scroll', placeOpenMenus, true); addEventListener('resize', placeOpenMenus);
+
 // a row's menu: built when opened, inside the row, so its buttons reach the row's click handler
 function rowMenu(item, actions) {
   const open = item.querySelector('.row-menu');
